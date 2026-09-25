@@ -68,7 +68,9 @@ The stop cannot be lifted by tooling. `tools/init_state.py` has no `--force`: wh
 sentinel exists it refuses (exit 2) and writes nothing, so recovery is a deliberate
 `rm $JEV_STATE_DIR/KILL` followed by an explicit re-initialisation — visible in shell
 history, in review, and in the audit log. Tests 21–25 of the kill-switch suite pin that
-behaviour, including that the old flag is rejected.
+behaviour, including that the old flag is rejected. The installer follows the same rule:
+it creates `mode.json` only when it is absent and preserves an existing state and the
+sentinel byte-for-byte on a re-run.
 
 Operator *intent* is never silently honoured either: the resolver reports `auto` if a
 state file records it, but this release downgrades it to `shadow` in the plugin

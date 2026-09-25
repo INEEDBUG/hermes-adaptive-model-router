@@ -2,7 +2,8 @@
 """Offline tests for ``tools/secret_scan.py``.
 
 Adversarial by design. A scanner is only trustworthy once it has been shown to catch
-something, and once a file that merely *mentions* a marker string cannot silence it.
+something, once a file that merely *mentions* a marker string cannot silence it, and
+once a synthetic placeholder on a line cannot exempt a real-shaped secret beside it.
 
 Run from the repository root::
 
@@ -23,6 +24,7 @@ SCANNER = ROOT / 'tools' / 'secret_scan.py'
 FAKE_KEY = 'sk-' + 'abcDEF1234567890xyzABC'
 FAKE_MAIL = 'somebody' + '@' + 'realcorp.cn'
 MARKER = 'host_or_project_identifiers'          # a pattern *name*, not a matched value
+ALLOWED_MAIL = 'a.b@example.com'                # in the scanner's allow list (match-scoped)
 
 R = []
 
@@ -172,6 +174,46 @@ try:
     rc, out = run_scan(h, '--git')
     chk('D4 the same repo still catches a secret committed beside a marker', rc == 1,
         f'rc={rc}')
+    # --- the allow list exempts a match, never a line ------------------------------
+    print('=== E. the allow list is match-scoped ===')
+    i = tmp / 'allowlist_line'
+    i.mkdir()
+    write_tree(i, {
+        'redacted_line.txt': f'REDACTED DEEPSEEK_API_KEY={FAKE_KEY}\n',
+        'fixture_line.txt': f'{ALLOWED_MAIL} DEEPSEEK_API_KEY={FAKE_KEY}\n',
+    })
+    rc, out = run_scan(i)
+    chk('E1 "REDACTED" cannot exempt a secret on the same line (MUST fail)',
+        rc == 1 and 'prefixed_api_key' in out, f'rc={rc}')
+    chk('E2 an allow-listed fixture cannot exempt a secret on the same line (MUST fail)',
+        rc == 1 and out.count('prefixed_api_key') >= 2, f'rc={rc}')
+
+    j = tmp / 'fixtures_only'
+    j.mkdir()
+    write_tree(j, {'fixture.txt': f'{ALLOWED_MAIL}\nsk-liveFAKE-EXAMPLEONLYNOTAREALKEY\n'})
+    rc, out = run_scan(j)
+    chk('E3 a legitimate allow-listed fixture by itself stays clean', rc == 0, f'rc={rc}')
+    write_tree(j, {'fixture.txt': f'{ALLOWED_MAIL}\nsk-liveFAKE-EXAMPLEONLYNOTAREALKEY\n'
+                                  f'DEEPSEEK_API_KEY={FAKE_KEY}\n'})
+    rc, out = run_scan(j)
+    chk('E4 a real-shaped secret further down the same file is still caught',
+        rc == 1 and 'prefixed_api_key' in out, f'rc={rc}')
+
+    # A PEM block spans lines: the pattern requires key material after the header, which
+    # is both a sharper positive control and why old single-line fixtures stay clean.
+    k = tmp / 'pem'
+    k.mkdir()
+    PEM_HEAD = '-' * 5 + 'BEGIN OPENSSH PRIVATE KEY' + '-' * 5
+    PEM_BODY = 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAE'
+    write_tree(k, {'leak.pem': f'{PEM_HEAD}\n{PEM_BODY}\n-----END OPENSSH PRIVATE KEY-----\n'})
+    rc, out = run_scan(k)
+    chk('E5 a real-shaped key block is reported (positive control)',
+        rc == 1 and 'private_key_block' in out, f'rc={rc}')
+    write_tree(k, {'leak.pem': f'{PEM_HEAD}\n{"MIIE" + "fake"}\n'})
+    rc, out = run_scan(k)
+    chk('E6 a header with a short synthetic body is not a finding (negative control)',
+        rc == 0, f'rc={rc}')
+
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

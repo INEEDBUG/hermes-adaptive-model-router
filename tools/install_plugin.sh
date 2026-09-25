@@ -13,7 +13,8 @@
 #   3. MERGES 'jev-shadow-router' into plugins.enabled  (never replaces the list)
 #      — config.yaml is backed up immediately before the first write
 #   4. initialises the runtime state file (mode.json) — mode.json is authoritative,
-#      and a missing file means the plugin stays off
+#      a missing file means the plugin stays off, an **existing** state (and a KILL
+#      sentinel) is preserved exactly, so re-running is genuinely idempotent
 #
 # Every file this script touches is backed up first, and if a backup cannot be made the
 # script refuses to modify the original. Backups are listed at the end of the run.
@@ -140,7 +141,12 @@ if name not in items:
 print(json.dumps(items))
 PY
 )"
-    hermes config set plugins.enabled "$MERGED" >/dev/null 2>&1 || HERMES_HOME="$HERMES_HOME" hermes config set plugins.enabled "$MERGED" >/dev/null
+    # Exactly one write, with HERMES_HOME explicit: the file this edits is the file that
+    # was just backed up. An earlier version tried `hermes config set` *without*
+    # HERMES_HOME first, which could merge the list into a different Hermes Home (the
+    # process default) while the backup sat in the target — the read and the write must
+    # name the same home.
+    HERMES_HOME="$HERMES_HOME" hermes config set plugins.enabled "$MERGED" >/dev/null
     say "plugins.enabled = $MERGED (existing entries preserved)"
   fi
 else
@@ -152,12 +158,30 @@ else
   say "      - $PLUGIN_NAME"
 fi
 
-step "4/4 Initialise the runtime state (authoritative mode.json)"
-if [ "$INIT_STATE" = "0" ]; then
-  say "skipped (--no-state). Without mode.json the plugin resolves to 'off'."
+step "4/4 Initialise the runtime state (authoritative mode.json; never overwritten)"
+# An existing state is the operator's decision, not an installer default: mode.json is
+# initialised only when it does not exist, a stop is never bypassed, and running the
+# installer twice is therefore genuinely idempotent.
+STATE_DIR="$(HERMES_HOME="$HERMES_HOME" python3 -c \
+  'import sys; sys.path.insert(0, sys.argv[1]); from router import state; print(state.state_dir())' \
+  "$REPO_ROOT" 2>/dev/null || true)"
+if [ -z "$STATE_DIR" ]; then
+  say "could not resolve the state directory — skipped (the plugin resolves to 'off' without mode.json)"
 else
-  if [ "$DRY_RUN" = "1" ]; then
-    say "[dry-run] would run: python3 tools/init_state.py --mode $STATE_MODE"
+  MODE_FILE="$STATE_DIR/mode.json"
+  KILL_FILE="$STATE_DIR/KILL"
+  if [ -f "$KILL_FILE" ]; then
+    say "stop sentinel present: $KILL_FILE"
+    say "preserved, never bypassed: nothing was written to $STATE_DIR"
+  elif [ -f "$MODE_FILE" ]; then
+    say "existing state preserved exactly: $MODE_FILE"
+    say "  $(tr -d '\n' < "$MODE_FILE" | cut -c1-160)"
+    say "  not overwritten. A reinstall never resets a mode; change it deliberately"
+    say "  (edit that file, or delete it and re-run) if that is really intended."
+  elif [ "$INIT_STATE" = "0" ]; then
+    say "skipped (--no-state). Without mode.json the plugin resolves to 'off'."
+  elif [ "$DRY_RUN" = "1" ]; then
+    say "[dry-run] would initialise mode=$STATE_MODE at $MODE_FILE"
   else
     python3 "$REPO_ROOT/tools/init_state.py" --mode "$STATE_MODE"
   fi

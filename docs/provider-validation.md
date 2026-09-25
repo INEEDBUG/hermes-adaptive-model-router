@@ -81,8 +81,8 @@ Notes on rigour:
 | `python3 tests/test_router.py` (default) | 39/39 — pure offline, no network, no credential |
 | `RUN_LIVE_TESTS=1 python3 tests/test_router.py` | 46/46 — adds the live routing group |
 | `python3 tests/test_state.py` | 26/26 — kill-switch resolver + initialiser boundary, offline |
-| `python3 tests/test_secret_scan.py` | 18/18 — scanner controls: positive, negative, adversarial |
-| `bash tests/test_installer.sh` | 21/21 — stand-in `hermes` CLI, throwaway `HERMES_HOME` |
+| `python3 tests/test_secret_scan.py` | 24/24 — scanner controls: positive, negative, adversarial |
+| `bash tests/test_installer.sh` | 36/36 — stand-in `hermes` CLI, target vs default home, existing state preserved |
 
 The live group is **opt-in by flag, not by credential discovery**: a credential merely
 being present on the machine never causes an external call, so the default run is safe

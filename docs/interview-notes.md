@@ -1,12 +1,12 @@
 # JEV Shadow Router 技术面试问答笔记
 
 这是一份口述笔记：每节先给一段可以照着说出口的参考回答，再给必要的事实边界。  
-所有数字只来自离线测试与真实验证记录（39/39 离线检查（live 组 opt-in 后 46/46）、26/26 kill-switch checks、secret-scanner controls 18/18、installer 21/21、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
+所有数字只来自离线测试与真实验证记录（39/39 离线检查（live 组 opt-in 后 46/46）、26/26 kill-switch checks、secret-scanner controls 24/24、installer 36/36、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
 `>` 开头的是边界声明，说明哪一条是读源码分析出来的、哪一条是实测过的 —— 面试时说清这条，比多抛一个数字更有说服力。
 
 > 测试默认完全离线：live 组只有显式设置 `RUN_LIVE_TESTS=1` 时才发起真实调用（本机恰好有凭据不会触发）。offline by default; the live group only runs with `RUN_LIVE_TESTS=1`, so a credential present on the machine never triggers a third-party call.  
 
-> CI 每次 push 都跑全部四个套件、状态初始化 dry run 与密钥/隐私扫描，且不配置任何 secret；扫描器精确识别自身文件（路径 + 精确内容哈希 + 历史版本的 git blob id），所以只是引用了模式名的文件照样会被扫描（有对抗性测试），超大对象会被报成不完整扫描并以 exit 3 退出，除非显式白名单。  
+> CI 每次 push 都跑全部四个套件、状态初始化 dry run 与密钥/隐私扫描，且不配置任何 secret；扫描器精确识别自身文件（路径 + 精确内容哈希 + 历史版本的 git blob id），所以只是引用了模式名的文件照样会被扫描；allow list 只豁免那一处具体的正则匹配 —— 同一行别处出现合成标记或 `REDACTED` 一词，并不能豁免旁边的真实形状密钥（有对抗性测试正好覆盖这一点）；私钥模式要求在 PEM header 之后确实有 key material 才报，而不是对每一次提及都报警，`.pem` 文件同样会被扫描；超大对象会被报成不完整扫描并以 exit 3 退出，除非显式白名单。  
 
 ## 1. 为什么需要 JEV（为什么不自己做规则/分类器）？
 
@@ -31,12 +31,13 @@ JEV 以 `choice` 问题返回 choice、confidence 和 probabilities，这个校�
 因为路由层同时提出了两个命题："我的决策是对的"和"照着我的决策执行是安全的"。只有第一个能在不碰生产的前提下被评估。  
 Shadow 模式下插件只注册一个 observer hook（`pre_api_request`），hook 永远返回 `None`，所以请求内容一个字节都不变；决策被记录，执行模型仍由 gateway 自己的配置决定，生产路径还是 DeepSeek V4.1 Flash。  
 运行模式也不是由环境变量决定的：**状态文件 `mode.json` 是权威**，每轮解析一次；文件缺失、损坏或不可读一律解析成 `off`（fail-safe），所以单独设一个 `ROUTER_MODE=shadow` 并不会打开采集。  
-记录里同时有 `actual_model`（真正执行的是谁）和 `would_execute`（未来的 auto 会选谁），所以任何决策规则都能事后离线评估，不用先切一次生产。可用性也不再是代码里的常量：`MIMO_AVAILABLE` 已经删掉，一条路由是否可执行由显式配置 `JEV_AVAILABLE_ROUTES`（如 `deepseek_flash,mimo_pro`）决定，公开默认为空，`router.config.available_routes()` 会忽略未知名称 —— 什么都没配时 `would_execute` 是 `null`，而不是指名某个 provider，这条规则对未来新增路由同样成立，不需要新增 provider 代码。  
+记录里同时有 `actual_model`（真正执行的是谁）和 `would_execute`（未来的 auto 会选谁），所以任何决策规则都能事后离线评估，不用先切一次生产。可用性也不再是代码里的常量：`MIMO_AVAILABLE` 已经删掉，一条路由是否可执行由显式配置 `JEV_AVAILABLE_ROUTES`（如 `deepseek_flash,mimo_pro`）决定，公开默认为空，`router.config.available_routes()` 会忽略未知名称 —— 什么都没配时 `would_execute` 是 `null`，而不是指名某个 provider，这条规则对未来新增路由同样成立：`JEV_AVAILABLE_ROUTES` 让部署可用性显式化，并为未来路由准备了配置面；真正新增一条路由仍需要为其扩展 criteria / telemetry / simulation / tests。  
 这就是 observable before automatic：先统计，再规则，最后才是自主。  
 
 > auto 目前是 design stage，未启用；启用需要代码自己检查的显式 approval flag。  
 > 这一版把状态文件里记录的 `auto` 降级成 `shadow`，并往 mode audit log 写一条 `auto_not_implemented`，所以 telemetry 和运维视图都不会显示出 auto 跑过。  
-> 安装脚本 `tools/install_plugin.sh` 把 `JEV_ROUTER_ROOT` 持久化进 Hermes 的 `.env`，对 `plugins.enabled` 是 merge 而不是 replace —— 已有插件条目会保留；而且它在第一次写入之前会先备份每一个会碰到的文件（`config.yaml.bak.<timestamp>`、`.env.bak.<timestamp>`），备份不成功就直接拒绝修改该文件。  
+> 安装脚本 `tools/install_plugin.sh` 把 `JEV_ROUTER_ROOT` 持久化进 Hermes 的 `.env`，对 `plugins.enabled` 是 merge 而不是 replace —— 已有插件条目会保留；而且它总是用显式 `HERMES_HOME` 调用 `hermes` CLI，所以它改的文件就是它备份过的那份文件（环境里另有一个 default/decoy home 也不会收到写入）；备份紧贴在写入之前：`config.yaml.bak.<timestamp>` 在第一次 `hermes config set` 之前、`.env.bak.<timestamp>` 在 append 之前，备份不成功就直接拒绝修改该文件。  
+> 安装脚本只在 `mode.json` 不存在时才初始化它：重复安装会逐字节保留已有状态（`mode=off`、已跳闸的 breaker 标记或 shadow），并且绝不会绕过 `KILL` 哨兵。  
 
 ## 4. 为什么不能每轮随便切模型？
 

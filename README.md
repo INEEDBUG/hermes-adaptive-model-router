@@ -133,7 +133,8 @@ numbers.
 router/     the routing library (config, redact, dossier, client, shadow, state)
 plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
 tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · kill-switch 26 ·
-            scanner controls 18 · installer 21 (fake CLI + throwaway HERMES_HOME)
+            scanner controls 24 (positive, negative, adversarial) · installer 36
+            (stand-in hermes CLI; target vs decoy home; existing state preserved)
 tools/      shadow_stats.py (real/test separation) · init_state.py (state file; no
             override for the kill sentinel) · install_plugin.sh (persistent install,
             backs up before writing) · secret_scan.py (tree + history; fails when a
@@ -153,7 +154,8 @@ cd hermes-adaptive-model-router
 python3 tests/test_router.py
 python3 tests/test_state.py
 
-# 2. install persistently (idempotent; merges plugins.enabled, never replaces it)
+# 2. install persistently (idempotent: merges plugins.enabled, never replaces the list,
+#    never resets an existing runtime state)
 ./tools/install_plugin.sh --hermes-home "$HERMES_HOME" --dry-run   # inspect first
 ./tools/install_plugin.sh --hermes-home "$HERMES_HOME"
 #    then restart the gateway so the plugin is loaded and the environment is re-read
@@ -162,11 +164,17 @@ python3 tests/test_state.py
 The installer copies the plugin into `$HERMES_HOME/plugins/`, **persists**
 `JEV_ROUTER_ROOT` in the Hermes `.env` (append-only, never overwriting an existing
 value), **merges** `jev-shadow-router` into the existing `plugins.enabled` list, and
-initialises the runtime state file. Every file it touches is backed up first —
-`config.yaml.bak.<timestamp>` immediately before the first `hermes config set`,
-`.env.bak.<timestamp>` before the append — a file whose backup cannot be made is left
-untouched, and the backups are listed at the end of the run. `--dry-run` prints the
-actions (including the planned backups) without performing them.
+creates the runtime state file **only when it does not exist yet**. Every file it
+touches is backed up first — `config.yaml.bak.<timestamp>` immediately before the first
+`hermes config set`, `.env.bak.<timestamp>` before the append — a file whose backup
+cannot be made is left untouched, and the backups are listed at the end of the run.
+Every CLI call is made with this `HERMES_HOME` set explicitly, so the file that gets
+edited is the file that was backed up (never the CLI's own default home), and
+`--dry-run` prints the actions, including the planned backups, without performing them.
+
+Re-running it is idempotent: an existing `mode.json` — whatever it records, including a
+tripped breaker flag — and a `KILL` sentinel are preserved byte-for-byte, so an installer
+run can neither reset the mode nor lift a stop.
 
 ### Runtime authority: the state file, not `ROUTER_MODE`
 
@@ -226,8 +234,9 @@ they can never inflate production statistics.
 router suite, offline default .... 39/39 checks pass
 router suite, RUN_LIVE_TESTS=1 ... 46/46 checks pass (adds the live routing group)
 kill-switch resolver ............. 26/26 checks pass
-secret-scanner controls .......... 18/18 checks pass (positive, negative, adversarial)
-installer ........................ 21/21 checks pass (fake CLI, throwaway HERMES_HOME)
+secret-scanner controls .......... 24/24 checks pass (positive, negative, adversarial)
+installer ........................ 36/36 checks pass (stand-in CLI, target vs default
+                                   home, existing state preserved)
 production shadow ................ validated through a real messaging gateway
 fail-open ........................ validated under injected failures and
                                    one observed real routing timeout

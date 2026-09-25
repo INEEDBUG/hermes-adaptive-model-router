@@ -31,8 +31,10 @@ DEFAULTS = {
     'JEV_AVAILABLE_ROUTES': '',
 }
 
-# Canonical route names the decision service can emit. Adding a future route means
-# adding its name here and to JEV_AVAILABLE_ROUTES — no other code change.
+# Canonical route names the decision service can emit. A future route is listed here and
+# named in JEV_AVAILABLE_ROUTES, which makes deployment availability explicit and
+# prepares this configuration surface for it — but adding a route for real still means
+# extending its criteria, telemetry, simulation and tests.
 KNOWN_ROUTES = ('deepseek_flash', 'mimo_pro')
 
 _AUTO_APPROVAL_KEYS = {'JEV_AUTO_APPROVED'}

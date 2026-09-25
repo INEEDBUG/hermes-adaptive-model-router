@@ -86,7 +86,7 @@ flowchart TD
 | 隐私脱敏 + 隐私 fallback | **已验证** |
 | 运行时 kill switch | **已验证**（26/26 parser 测试，fail-safe = off；无 override 标志） |
 | 真实/测试遥测分离 | **已验证** |
-| 路由可用性 | **配置而非假定** —— `JEV_AVAILABLE_ROUTES`；公开默认值为空 |
+| 路由可用性 | **配置，绝不假定** —— `JEV_AVAILABLE_ROUTES`；公开默认值为空 |
 | CI（离线套件 + 密钥扫描） | 已在 `.github/workflows/ci.yml` **配置**；无需任何密钥 |
 | 自动 provider 切换 | **设计阶段 —— 未启用** |
 | auto 模式的并发隔离 | **已分析；仍有一项实证测试未完成** |
@@ -122,7 +122,8 @@ flowchart TD
 router/     the routing library (config, redact, dossier, client, shadow, state)
 plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
 tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · kill-switch 26 ·
-            scanner controls 18 · installer 21 (fake CLI + throwaway HERMES_HOME)
+            scanner controls 24 (positive, negative, adversarial) · installer 36
+            (stand-in hermes CLI; target vs decoy home; existing state preserved)
 tools/      shadow_stats.py (real/test separation) · init_state.py (state file; no
             override for the kill sentinel) · install_plugin.sh (persistent install,
             backs up before writing) · secret_scan.py (tree + history; fails when a
@@ -142,7 +143,8 @@ cd hermes-adaptive-model-router
 python3 tests/test_router.py
 python3 tests/test_state.py
 
-# 2. install persistently (idempotent; merges plugins.enabled, never replaces it)
+# 2. install persistently (idempotent: merges plugins.enabled, never replaces the list,
+#    never resets an existing runtime state)
 ./tools/install_plugin.sh --hermes-home "$HERMES_HOME" --dry-run   # inspect first
 ./tools/install_plugin.sh --hermes-home "$HERMES_HOME"
 #    then restart the gateway so the plugin is loaded and the environment is re-read
@@ -150,8 +152,16 @@ python3 tests/test_state.py
 
 安装脚本会把 plugin 复制进 `$HERMES_HOME/plugins/`，把 `JEV_ROUTER_ROOT` **持久化**写入
 Hermes 的 `.env`（追加写入，永不覆盖已有的值），把 `jev-shadow-router` **合并**进既有的
-`plugins.enabled` 列表（而不是替换它），并初始化运行时状态文件。它触碰的每个文件都会先
-被备份，而 `--dry-run` 只打印将要执行的动作、不实际执行。
+`plugins.enabled` 列表（而不是替换它），并且**只在运行时状态文件尚不存在时**创建它。它
+触碰的每个文件都会先被备份 —— `config.yaml.bak.<timestamp>` 就在第一次 `hermes config set`
+之前、`.env.bak.<timestamp>` 在追加写入之前 —— 无法为某个文件创建备份时，该文件会被原样
+保留、不做修改，所有备份都会在运行结束时列出。每一次 CLI 调用都显式设置了这个
+`HERMES_HOME`，因此被编辑的文件正是被备份的那个文件（永远不是 CLI 自己的默认 home），
+`--dry-run` 也只打印将要执行的动作（包括计划中的备份），不实际执行。
+
+重跑它是幂等的：既有的 `mode.json` —— 无论它记录了什么，包括已触发的 breaker 标志 ——
+以及 `KILL` sentinel 都会被逐字节原样保留，因此一次安装脚本运行既不能重置模式，也不能
+解除一次停止。
 
 ### 运行时权威：状态文件，而非 `ROUTER_MODE`
 
@@ -160,7 +170,8 @@ Hermes 的 `.env`（追加写入，永不覆盖已有的值），把 `jev-shadow
 `ROUTER_MODE` 只是库内配置辅助函数使用的一个默认值；它*并不是*运行时开关，所以单独
 设置 `ROUTER_MODE=shadow` 什么都采集不到。
 
-采集必须被显式启用，而且只要 `KILL` sentinel 存在，该工具就会拒绝写入：
+采集必须被显式启用，而且只要 `KILL` sentinel 存在，该工具就会拒绝写入 —— 没有 override
+标志，因此恢复意味着必须先有意删除该 sentinel：
 
 ```bash
 python3 tools/init_state.py             # writes mode=shadow atomically
@@ -206,8 +217,9 @@ session 与故障注入运行都会被归入 excluded 桶并被显式列出，�
 router suite, offline default .... 39/39 checks pass
 router suite, RUN_LIVE_TESTS=1 ... 46/46 checks pass (adds the live routing group)
 kill-switch resolver ............. 26/26 checks pass
-secret-scanner controls .......... 18/18 checks pass (positive, negative, adversarial)
-installer ........................ 21/21 checks pass (fake CLI, throwaway HERMES_HOME)
+secret-scanner controls .......... 24/24 checks pass (positive, negative, adversarial)
+installer ........................ 36/36 checks pass (stand-in CLI, target vs default
+                                   home, existing state preserved)
 production shadow ................ validated through a real messaging gateway
 fail-open ........................ validated under injected failures and
                                    one observed real routing timeout

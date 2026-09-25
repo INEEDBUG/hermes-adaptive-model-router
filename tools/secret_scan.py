@@ -15,6 +15,11 @@ than no scan at all:
 * **Skipped work must be visible.** Objects above the size cap are reported as
   ``scan incomplete`` and fail the run (exit 3) unless the operator explicitly allows
   them, so "clean" always means "everything was scanned".
+* **An allow-list entry exempts one match, never a line.** Synthetic fixtures are
+  recognised by comparing the *matched value* against the known markers, so a line that
+  merely mentions a placeholder (or the word ``REDACTED``) cannot hide a real secret
+  beside it. The private-key pattern likewise requires actual key material after the
+  header instead of reporting every mention of a PEM header.
 
 Usage::
 
@@ -43,7 +48,6 @@ PATTERNS = [
     ('github_token', re.compile(r'\b(?:gho|ghp|ghs|github_pat)_[A-Za-z0-9_]{20,}\b')),
     ('jwt_or_long_token', re.compile(r'\beyJ[A-Za-z0-9_\-]{20,}')),
     ('bearer_value', re.compile(r'(?i)\bbearer\s+(?!\[REDACTED\])[A-Za-z0-9._\-]{20,}')),
-    ('private_key_block', re.compile(r'-----BEGIN[^-]*PRIVATE KEY-----')),
     ('ipv4_private', re.compile(r'\b(?:192\.168|10|172\.(?:1[6-9]|2[0-9]|3[01]))\.\d{1,3}\.\d{1,3}\b')),
     ('mac_address', re.compile(r'\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b')),
     ('email', re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')),
@@ -54,7 +58,22 @@ PATTERNS = [
     ('absolute_nas_path', re.compile(r'/vol\d\b')),
 ]
 
-# Strings that legitimately appear in tests, examples and redaction patterns.
+# Artifacts that span lines are matched over the whole text, not per line: a PEM header
+# alone is a *mention*, and the pattern therefore requires key material after it
+# (a real newline or an escaped one, then base64). This is both more precise than
+# flagging every header and strictly better at catching a pasted key block.
+BLOCK_PATTERNS = [
+    ('private_key_block',
+     re.compile(r'-----BEGIN[^-]*PRIVATE KEY-----(?:\\n|\r?\n)[A-Za-z0-9+/=]{16,}')),
+]
+
+# Strings that are synthetic when they appear as the *matched value* of a pattern. The
+# check is per match, never per line: an earlier version skipped a whole line whenever
+# any of these appeared anywhere on it, so
+#
+#     <marker>  DEEPSEEK_API_KEY=sk-<real-shaped-secret>
+#
+# was accepted silently — one quoted placeholder could hide a real secret next to it.
 ALLOW_LIST = [
     'EXAMPLEONLYNOTAREALKEY',
     'your_typesafe_key_here',
@@ -62,6 +81,7 @@ ALLOW_LIST = [
     'your_deepseek_key_here',
     'for-fault-injection',
     'a.b@example.com',
+    'a@b.co',
     'testuser@198.51.100.7',
     '192.0.2.10',
     '198.51.100.7',
@@ -71,7 +91,8 @@ ALLOW_LIST = [
 ]
 
 SKIP_DIRS = {'.git', '__pycache__', '.venv', 'node_modules', '.mypy_cache', '.pytest_cache'}
-TEXT_SUFFIXES = {'.py', '.md', '.sh', '.yaml', '.yml', '.json', '.env', '.txt', '.cfg', '.toml', ''}
+TEXT_SUFFIXES = {'.py', '.md', '.sh', '.yaml', '.yml', '.json', '.env', '.txt', '.cfg',
+                 '.toml', '.pem', ''}
 
 # Objects larger than this are not read; they are reported as unscanned instead of
 # being skipped quietly (see MAX_OBJECT_BYTES handling in main()).
@@ -166,14 +187,41 @@ def _allowed(ident: str, allow) -> bool:
     return any(ident.startswith(a) for a in allow if a)
 
 
-def scan_text(text: str, patterns=None):
-    patterns = patterns or PATTERNS
+def match_is_allowed(value: str, allow_list=None) -> bool:
+    """True only when the matched text **itself** is a known synthetic fixture.
+
+    The comparison is against the regex match, never against the surrounding line: a
+    synthetic marker elsewhere on the line must not exempt the match, and a match that
+    merely *contains* the marker (``sk-EXAMPLEONLYNOTAREALKEY``) is still synthetic.
+    """
+    allow = ALLOW_LIST if allow_list is None else allow_list
+    v = value or ''
+    return any(a and a in v for a in allow)
+
+
+def scan_text(text: str, patterns=None, allow_list=None, block_patterns=None):
+    """Yield ``(pattern_name, line_number)`` for every non-synthetic match.
+
+    Line-oriented patterns report at most one finding per line, as before — but a line is
+    never exempted as a whole, so other patterns on it are still evaluated. Multi-line
+    patterns (a PEM block) are evaluated over the whole text.
+    """
+    patterns = PATTERNS if patterns is None else patterns
+    blocks = BLOCK_PATTERNS if block_patterns is None else block_patterns
+    allow = ALLOW_LIST if allow_list is None else allow_list
     for i, line in enumerate(text.splitlines(), 1):
-        if any(a in line for a in ALLOW_LIST):
-            continue
         for name, rx in patterns:
-            if rx.search(line):
+            for m in rx.finditer(line):
+                if match_is_allowed(m.group(0), allow):
+                    continue
                 yield name, i
+                break
+    for name, rx in blocks:
+        for m in rx.finditer(text):
+            if match_is_allowed(m.group(0), allow):
+                continue
+            yield name, text.count('\n', 0, m.start()) + 1
+            break
 
 
 def iter_files(root: pathlib.Path, report: Report, *, max_bytes: int, allow):
