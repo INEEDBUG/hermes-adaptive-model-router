@@ -1,0 +1,32 @@
+{
+  "_comment": "Synthetic examples of the runtime state file. The real file lives at $JEV_STATE_DIR/mode.json. Example 1 is the shadow-only mode used in production.",
+
+  "example_shadow": {
+    "mode": "shadow",
+    "updated_at": 1760000000,
+    "auto_until": null,
+    "heartbeat": null,
+    "tripped": false,
+    "by": "operator"
+  },
+
+  "example_auto_lease": {
+    "_comment": "auto additionally requires JEV_AUTO_APPROVED; an expired auto_until or a heartbeat older than 120s degrades to shadow.",
+    "mode": "auto",
+    "updated_at": 1760000000,
+    "auto_until": 1760003600,
+    "heartbeat": 1760000000,
+    "tripped": false,
+    "by": "operator",
+    "reason": "bounded experiment window"
+  },
+
+  "example_tripped": {
+    "_comment": "Shape a circuit breaker would write after N consecutive routing failures. Clearing it is an explicit operator action.",
+    "mode": "off",
+    "updated_at": 1760000000,
+    "tripped": true,
+    "by": "circuit-breaker",
+    "reason": "5 consecutive routing failures"
+  }
+}

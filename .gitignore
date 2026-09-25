@@ -1,0 +1,35 @@
+# Secrets and local state — never commit these
+.env
+*.env
+!.env.example
+!examples/*.example.env
+credentials.json
+auth.json
+
+# Hermes runtime state
+state/
+mode.json
+KILL
+logs/
+*.jsonl
+*.db
+*.db-wal
+*.db-shm
+backups/
+cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp

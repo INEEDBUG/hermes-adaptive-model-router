@@ -1,0 +1,7 @@
+name: jev-shadow-router
+version: "0.1.0"
+description: "Shadow-only routing observer: asks a TypeSafe JEV routing service for a route decision once per user turn, logs the decision and never changes the executing model."
+author: "hermes-adaptive-model-router contributors"
+kind: standalone
+hooks:
+  - pre_api_request
