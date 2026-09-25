@@ -14,10 +14,16 @@ Usage::
     python3 tools/secret_scan.py                 # scan the working tree
     python3 tools/secret_scan.py --git           # also scan every commit's content
     python3 tools/secret_scan.py --root /path    # scan another checkout
+
+The history scan reads committed blob content in-process rather than shelling out to
+``git grep``: git's regex dialect is POSIX ERE, which has no ``(?:``, no ``(?i)`` and
+no lookahead, and a pattern it cannot compile makes the whole invocation return
+nothing — a silent no-op that looks exactly like a clean result.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import pathlib
 import re
 import subprocess
@@ -61,11 +67,52 @@ ALLOW_LIST = [
 SKIP_DIRS = {'.git', '__pycache__', '.venv', 'node_modules', '.mypy_cache', '.pytest_cache'}
 TEXT_SUFFIXES = {'.py', '.md', '.sh', '.yaml', '.yml', '.json', '.env', '.txt', '.cfg', '.toml', ''}
 
+# The history scan reads every blob object in the repository; very large blobs are
+# skipped to keep it bounded (multi-megabyte binaries belong to a dedicated secret
+# manager, not to this scanner).
+MAX_BLOB_BYTES = 2 * 1024 * 1024
+
 # The scanner's own pattern table necessarily contains the identifier strings it
-# searches for; scanning itself would always self-match. It is excluded here rather
-# than by adding those strings to ALLOW_LIST, so a real finding that happens to
-# contain one of them is still reported.
+# searches for, so scanning itself always self-matches. It is excluded by identity
+# *and* by content hash, so a copy of this file at any path (a second checkout, an
+# unpacked release tarball) is skipped as well. Those strings are deliberately not
+# added to ALLOW_LIST, so a real finding that happens to contain one is still reported.
 SELF = pathlib.Path(__file__).resolve()
+SELF_NAME = SELF.name
+# Content-based self-identification, used for committed copies of this scanner at any
+# path and from any past commit: every version of the pattern table contains this
+# name, so such a blob is recognised without keeping a path or hash list. For a real
+# finding to be skipped this way it would have to mention the pattern name, which is
+# not a realistic hiding place for a secret.
+SELF_MARKER = 'host_or_project_identifiers'
+try:
+    SELF_SHA256 = hashlib.sha256(SELF.read_bytes()).hexdigest()
+except Exception:                                      # pragma: no cover - defensive
+    SELF_SHA256 = None
+
+
+def is_self_text(text: str) -> bool:
+    """True when ``text`` is (any version of) this scanner."""
+    return SELF_MARKER in text
+
+
+def is_self(p: pathlib.Path) -> bool:
+    """True for this scanner itself, at this path or at any copy of it."""
+    if p.resolve() == SELF:
+        return True
+    try:
+        raw = p.read_bytes()
+    except Exception:
+        return False
+    if SELF_SHA256 is not None and hashlib.sha256(raw).hexdigest() == SELF_SHA256:
+        return True
+    if SELF_MARKER:
+        try:
+            if is_self_text(raw.decode('utf-8', 'replace')):
+                return True
+        except Exception:
+            return False
+    return False
 
 
 def iter_files(root: pathlib.Path):
@@ -74,7 +121,7 @@ def iter_files(root: pathlib.Path):
             continue
         if any(part in SKIP_DIRS for part in p.parts):
             continue
-        if p.resolve() == SELF:
+        if is_self(p):
             continue
         if p.suffix not in TEXT_SUFFIXES:
             continue
@@ -103,32 +150,62 @@ def scan_tree(root: pathlib.Path) -> list:
     return findings
 
 
+def _iter_blob_objects(root: pathlib.Path):
+    """Yield ``(object_id, payload)`` for every blob object in the repository."""
+    listing = subprocess.run(
+        ['git', '-C', str(root), 'cat-file', '--batch-all-objects',
+         '--batch-check=%(objecttype) %(objectname) %(objectsize)'],
+        capture_output=True, text=True, check=True).stdout
+    ids = [line.split()[1] for line in listing.splitlines() if line.startswith('blob ')]
+    if not ids:
+        return
+    data = subprocess.run(['git', '-C', str(root), 'cat-file', '--batch'],
+                          input=('\n'.join(ids) + '\n').encode(),
+                          capture_output=True, check=True).stdout
+    pos = 0
+    while pos < len(data):
+        nl = data.find(b'\n', pos)
+        if nl < 0:
+            return
+        header = data[pos:nl].split()
+        if len(header) < 3:
+            return
+        size = int(header[2])
+        start = nl + 1
+        yield header[0].decode(), data[start:start + size]
+        pos = start + size + 1                          # skip the object's trailing newline
+
+
 def scan_git(root: pathlib.Path) -> list:
-    """Scan the content of every commit in the repository (not commit metadata)."""
+    """Scan the content of every committed blob (commit metadata is never scanned).
+
+    The same compiled patterns as the working-tree scan are used, so history and tree
+    coverage cannot drift apart. Committed copies of this scanner are identified by
+    content (:data:`SELF_MARKER`), and matched content is never reported — a finding
+    names the blob and suggests how to locate it.
+    """
+    check = subprocess.run(['git', '-C', str(root), 'rev-parse', '--is-inside-work-tree'],
+                           capture_output=True, text=True)
+    if check.returncode != 0 or check.stdout.strip() != 'true':
+        return []                                       # no repository: no history to scan
     try:
-        revs = subprocess.run(['git', '-C', str(root), 'rev-list', '--all'],
-                              capture_output=True, text=True, check=True).stdout.split()
-    except Exception:
-        return []
-    if not revs:
-        return []
+        blobs = list(_iter_blob_objects(root))
+    except Exception as exc:
+        return [('git_history_unavailable', 0, type(exc).__name__)]
     findings = []
-    for rev in revs:
-        try:
-            out = subprocess.run(['git', '-C', str(root), 'grep', '-nI', '-E',
-                                  '|'.join(rx.pattern for _, rx in PATTERNS), rev],
-                                 capture_output=True, text=True).stdout
-        except Exception:
-            continue
-        for line in out.splitlines():
-            if any(a in line for a in ALLOW_LIST):
-                continue
-        # A single aggregate grep per revision is enough for a hit/miss decision;
-        # report the revision rather than the matched content.
-        if out.strip():
-            hits = [l for l in out.splitlines() if not any(a in l for a in ALLOW_LIST)]
-            if hits:
-                findings.append((f'git:{rev[:12]}', 0, f'{len(hits)} matching line(s)'))
+    for oid, payload in blobs:
+        if len(payload) > MAX_BLOB_BYTES:
+            continue                                     # keep the scan bounded; see note above
+        text = payload.decode('utf-8', 'replace')
+        if is_self_text(text):
+            continue                                     # a committed copy of this scanner
+        hits = list(scan_text(text))
+        if hits:
+            # Readable in the same "[finding name] location" shape as tree findings,
+            # and content-free: the blob id alone identifies where the hit lives.
+            findings.append((f'blob {oid[:12]}', 0,
+                             f'{len(hits)} matching line(s); locate with '
+                             f'git log --all --find-object={oid[:12]}'))
     return findings
 
 
