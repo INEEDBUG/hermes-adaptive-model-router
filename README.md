@@ -90,8 +90,9 @@ explicit approval flag that the code checks itself.
 | DeepSeek V4.1 Flash integration | **Validated** (text, reasoning, tools, multi-step loop, coding, error paths) |
 | MiMo V2.6 Pro integration | **Validated** (same matrix) |
 | Privacy redaction + privacy fallback | **Validated** |
-| Runtime kill switch | **Validated** (21/21 parser tests, fail-safe = off) |
+| Runtime kill switch | **Validated** (26/26 parser tests, fail-safe = off; no override flag) |
 | Real/test telemetry separation | **Validated** |
+| Route availability | **Configured, never assumed** — `JEV_AVAILABLE_ROUTES`; the public default is empty |
 | CI (offline suites + secret scan) | **Configured** in `.github/workflows/ci.yml`; no secrets required |
 | Automatic provider switching | **Design stage — not enabled** |
 | Concurrency isolation for auto mode | **Analyzed; one empirical test still outstanding** |
@@ -131,9 +132,12 @@ numbers.
 ```
 router/     the routing library (config, redact, dossier, client, shadow, state)
 plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
-tests/      offline test suites (33 checks offline, 40 with RUN_LIVE_TESTS=1; 21 kill-switch checks)
-tools/      shadow_stats.py (real/test separation) · init_state.py (state file) ·
-            install_plugin.sh (persistent install) · secret_scan.py (CI + local use)
+tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · kill-switch 26 ·
+            scanner controls 18 · installer 21 (fake CLI + throwaway HERMES_HOME)
+tools/      shadow_stats.py (real/test separation) · init_state.py (state file; no
+            override for the kill sentinel) · install_plugin.sh (persistent install,
+            backs up before writing) · secret_scan.py (tree + history; fails when a
+            scan is incomplete)
 docs/       architecture, shadow mode, privacy model, failover, validation, auto design
 examples/   fully synthetic configuration and telemetry samples
 .github/    CI: offline suites + state-init dry run + secret scan (no secrets configured)
@@ -158,8 +162,11 @@ python3 tests/test_state.py
 The installer copies the plugin into `$HERMES_HOME/plugins/`, **persists**
 `JEV_ROUTER_ROOT` in the Hermes `.env` (append-only, never overwriting an existing
 value), **merges** `jev-shadow-router` into the existing `plugins.enabled` list, and
-initialises the runtime state file. Every file it touches is backed up first, and
-`--dry-run` prints the actions without performing them.
+initialises the runtime state file. Every file it touches is backed up first —
+`config.yaml.bak.<timestamp>` immediately before the first `hermes config set`,
+`.env.bak.<timestamp>` before the append — a file whose backup cannot be made is left
+untouched, and the backups are listed at the end of the run. `--dry-run` prints the
+actions (including the planned backups) without performing them.
 
 ### Runtime authority: the state file, not `ROUTER_MODE`
 
@@ -170,7 +177,8 @@ library's configuration helper; it is *not* the runtime switch, so setting
 `ROUTER_MODE=shadow` on its own collects nothing.
 
 Collection must be enabled explicitly, and the tool refuses to write while a `KILL`
-sentinel is present:
+sentinel is present — there is no override flag, so resuming means deleting the
+sentinel deliberately first:
 
 ```bash
 python3 tools/init_state.py             # writes mode=shadow atomically
@@ -193,6 +201,7 @@ Configuration is environment-first, then `.env`, then built-in defaults
 | `JEV_MIN_CONFIDENCE` | `0.65` | below this the simulated decision prefers the capable route |
 | `JEV_MIN_MARGIN` | `0.15` | minimal top-2 probability margin |
 | `JEV_TIMEOUT_SECONDS` | `3` | hard cap for the routing call |
+| `JEV_AVAILABLE_ROUTES` | empty | routes this deployment has validated; empty means none, so no record claims an unvalidated provider is executable |
 | `TYPESAFE_API_KEY` | — | credential for the routing service (never logged) |
 | `JEV_STATE_DIR` | `$HERMES_HOME/jev_router/state` | kill sentinel + state file |
 | `JEV_LOG_DIR` | `$HERMES_HOME/logs/router` | shadow telemetry |
@@ -214,9 +223,11 @@ they can never inflate production statistics.
 ## Validation
 
 ```
-router suite, offline default .... 33/33 checks pass
-router suite, RUN_LIVE_TESTS=1 ... 40/40 checks pass (adds the live routing group)
-kill-switch resolver ............. 21/21 checks pass
+router suite, offline default .... 39/39 checks pass
+router suite, RUN_LIVE_TESTS=1 ... 46/46 checks pass (adds the live routing group)
+kill-switch resolver ............. 26/26 checks pass
+secret-scanner controls .......... 18/18 checks pass (positive, negative, adversarial)
+installer ........................ 21/21 checks pass (fake CLI, throwaway HERMES_HOME)
 production shadow ................ validated through a real messaging gateway
 fail-open ........................ validated under injected failures and
                                    one observed real routing timeout
@@ -225,7 +236,9 @@ fail-open ........................ validated under injected failures and
 The live routing group is **opt-in** (`RUN_LIVE_TESTS=1`, plus a configured
 credential): a credential merely being present on the machine never triggers a
 third-party call, so the default run is fully offline and runnable by anyone. CI runs
-the offline suites and the secret scan on every push with no secrets configured. See
+all four suites, the state-initialiser dry run and the secret scan on every push with
+no secrets configured. The scan is built to fail: findings exit 1, and an object left
+unscanned (over the size cap) exits 3 instead of reporting clean. See
 `docs/provider-validation.md` for the per-provider matrix.
 
 ## Privacy and security
@@ -256,6 +269,9 @@ approval + lease + heartbeat. Anything unreadable, corrupt or missing resolves t
   `dossier_token_estimate` measures the routing input, not the agent's conversation
   context or the provider's prompt cache. A future auto release must collect that
   runtime signal before the switching rule can be evaluated.
+- Route availability is **configured, not discovered**: with `JEV_AVAILABLE_ROUTES`
+  empty (the public default) nothing is executable, so `would_execute` is recorded as
+  `null` rather than naming a provider that was never validated.
 - Statistics from a small real-traffic sample are reported as distributions only.
 
 ## License

@@ -10,9 +10,17 @@ The **runtime authority is the state file**, not the ``ROUTER_MODE`` variable:
 * setting ``ROUTER_MODE=shadow`` alone therefore does **not** make the plugin
   collect anything — the state file must exist first.
 
-This tool creates that file explicitly and atomically. It refuses to write
-``auto`` (not implemented in this release) and refuses to touch anything while a
-``KILL`` sentinel is present, so an operator cannot accidentally clear a stop.
+This tool creates that file explicitly and atomically, and it refuses to write
+``auto`` (not implemented in this release).
+
+The ``KILL`` sentinel is a hard boundary
+----------------------------------------
+While ``$JEV_STATE_DIR/KILL`` exists, every resolution is ``off`` and this tool
+**refuses to write — there is no override flag**. An operator convenience tool must not
+be able to undo a stop; only a deliberate, visible action can:
+
+    rm "$JEV_STATE_DIR/KILL"        # deliberate, outside this tool
+    python3 tools/init_state.py     # then re-initialise, if that is really intended
 
 Usage::
 
@@ -40,9 +48,6 @@ def main() -> int:
     ap.add_argument('--state-dir', default=None,
                     help='override the state directory (default: router.state.state_dir())')
     ap.add_argument('--dry-run', action='store_true', help='report only, write nothing')
-    ap.add_argument('--force', action='store_true',
-                    help='proceed even if a KILL sentinel is present (do NOT use to resume '
-                         'incident handling)')
     args = ap.parse_args()
 
     if args.state_dir:
@@ -57,10 +62,12 @@ def main() -> int:
     print(f'state file      : {mode_file}')
     print(f'kill sentinel   : {kill} ({"PRESENT" if kill.exists() else "absent"})')
 
-    if kill.exists() and not args.force:
+    if kill.exists():
         print()
         print('REFUSING TO WRITE: a KILL sentinel is present, which resolves to mode=off.')
-        print('Remove the sentinel deliberately first, then re-run. Nothing was changed.')
+        print('This tool has no override for that boundary — resuming must be deliberate:')
+        print(f'  rm {kill}')
+        print('then re-run this tool. Nothing was changed.')
         return 2
 
     if args.dry_run:

@@ -73,7 +73,7 @@ Per decision:
 | `latency_ms`, `input_tokens`, `output_tokens` | Cost and latency envelope |
 | `success`, `error` | Failure taxonomy |
 | `actual_model` | What really executed — the shadow invariant |
-| `would_execute` | What a future auto mode would have chosen |
+| `would_execute` | What a future auto mode would have chosen — restricted to routes this deployment **configured** in `JEV_AVAILABLE_ROUTES`; `null` when nothing is configured |
 | `mode` | Mode in force for that turn |
 | `task_length`, `tool_use`, `shell`, `coding`, `debugging`, `research`, `long_context`, `destructive_action`, `production_change` | Content-free task features |
 | `redaction_count` | How many redaction hits the turn produced (a count, never content) |

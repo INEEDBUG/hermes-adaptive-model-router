@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -156,6 +157,35 @@ src = (ROOT / 'router' / 'state.py').read_text()
 banned = ['switch_model', 'register_middleware']
 chk('19 no model/auto path', not any(b in src for b in banned))
 chk('20 no credential handling in state.py', 'API_KEY=' not in src and 'Authorization' not in src)
+
+# --- the initialiser CLI, and the hard boundary around KILL ----------------------
+# These run the real tool as a subprocess: the point is that an operator convenience
+# tool cannot undo a stop, which is only checkable through its command line.
+reset()
+mode_file = pathlib.Path(TEST_DIR, 'mode.json')
+kill = pathlib.Path(TEST_DIR, 'KILL')
+kill.write_text('stop\n')
+before = mode_file.read_text() if mode_file.exists() else ''
+initialiser = ROOT / 'tools' / 'init_state.py'
+
+p = subprocess.run([sys.executable, str(initialiser), '--force'],
+                   capture_output=True, text=True)
+chk('21 --force is not an option any more', p.returncode != 0 and 'force' in p.stderr.lower(),
+    f'rc={p.returncode}')
+
+p = subprocess.run([sys.executable, str(initialiser)], capture_output=True, text=True)
+chk('22 a KILL sentinel makes the initialiser refuse', p.returncode == 2 and 'REFUSING' in p.stdout,
+    f'rc={p.returncode}')
+after = mode_file.read_text() if mode_file.exists() else ''
+chk('23 the refusal changes no state', after == before)
+
+p = subprocess.run([sys.executable, str(initialiser)], capture_output=True, text=True)
+chk('24 it still refuses while the sentinel exists', p.returncode == 2, f'rc={p.returncode}')
+
+kill.unlink()                       # the deliberate, visible action recovery requires
+p = subprocess.run([sys.executable, str(initialiser)], capture_output=True, text=True)
+chk('25 after deleting the sentinel, initialisation succeeds again',
+    p.returncode == 0 and state.resolve(now)['mode'] == 'shadow', f'rc={p.returncode}')
 
 fails = [n for n, ok in R if not ok]
 print(f"\ntotal {len(R)} checks, failed {len(fails)}: {fails}")

@@ -1,10 +1,12 @@
 # JEV Shadow Router 技术面试问答笔记
 
 这是一份口述笔记：每节先给一段可以照着说出口的参考回答，再给必要的事实边界。  
-所有数字只来自离线测试与真实验证记录（33/33 离线检查（live 组 opt-in 后 40/40）、21/21 kill-switch checks、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
+所有数字只来自离线测试与真实验证记录（39/39 离线检查（live 组 opt-in 后 46/46）、26/26 kill-switch checks、secret-scanner controls 18/18、installer 21/21、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
 `>` 开头的是边界声明，说明哪一条是读源码分析出来的、哪一条是实测过的 —— 面试时说清这条，比多抛一个数字更有说服力。
 
 > 测试默认完全离线：live 组只有显式设置 `RUN_LIVE_TESTS=1` 时才发起真实调用（本机恰好有凭据不会触发）。offline by default; the live group only runs with `RUN_LIVE_TESTS=1`, so a credential present on the machine never triggers a third-party call.  
+
+> CI 每次 push 都跑全部四个套件、状态初始化 dry run 与密钥/隐私扫描，且不配置任何 secret；扫描器精确识别自身文件（路径 + 精确内容哈希 + 历史版本的 git blob id），所以只是引用了模式名的文件照样会被扫描（有对抗性测试），超大对象会被报成不完整扫描并以 exit 3 退出，除非显式白名单。  
 
 ## 1. 为什么需要 JEV（为什么不自己做规则/分类器）？
 
@@ -29,12 +31,12 @@ JEV 以 `choice` 问题返回 choice、confidence 和 probabilities，这个校�
 因为路由层同时提出了两个命题："我的决策是对的"和"照着我的决策执行是安全的"。只有第一个能在不碰生产的前提下被评估。  
 Shadow 模式下插件只注册一个 observer hook（`pre_api_request`），hook 永远返回 `None`，所以请求内容一个字节都不变；决策被记录，执行模型仍由 gateway 自己的配置决定，生产路径还是 DeepSeek V4.1 Flash。  
 运行模式也不是由环境变量决定的：**状态文件 `mode.json` 是权威**，每轮解析一次；文件缺失、损坏或不可读一律解析成 `off`（fail-safe），所以单独设一个 `ROUTER_MODE=shadow` 并不会打开采集。  
-记录里同时有 `actual_model`（真正执行的是谁）和 `would_execute`（未来的 auto 会选谁），所以任何决策规则都能事后离线评估，不用先切一次生产。  
+记录里同时有 `actual_model`（真正执行的是谁）和 `would_execute`（未来的 auto 会选谁），所以任何决策规则都能事后离线评估，不用先切一次生产。可用性也不再是代码里的常量：`MIMO_AVAILABLE` 已经删掉，一条路由是否可执行由显式配置 `JEV_AVAILABLE_ROUTES`（如 `deepseek_flash,mimo_pro`）决定，公开默认为空，`router.config.available_routes()` 会忽略未知名称 —— 什么都没配时 `would_execute` 是 `null`，而不是指名某个 provider，这条规则对未来新增路由同样成立，不需要新增 provider 代码。  
 这就是 observable before automatic：先统计，再规则，最后才是自主。  
 
 > auto 目前是 design stage，未启用；启用需要代码自己检查的显式 approval flag。  
 > 这一版把状态文件里记录的 `auto` 降级成 `shadow`，并往 mode audit log 写一条 `auto_not_implemented`，所以 telemetry 和运维视图都不会显示出 auto 跑过。  
-> 安装脚本 `tools/install_plugin.sh` 把 `JEV_ROUTER_ROOT` 持久化进 Hermes 的 `.env`，对 `plugins.enabled` 是 merge 而不是 replace —— 已有插件条目会保留。  
+> 安装脚本 `tools/install_plugin.sh` 把 `JEV_ROUTER_ROOT` 持久化进 Hermes 的 `.env`，对 `plugins.enabled` 是 merge 而不是 replace —— 已有插件条目会保留；而且它在第一次写入之前会先备份每一个会碰到的文件（`config.yaml.bak.<timestamp>`、`.env.bak.<timestamp>`），备份不成功就直接拒绝修改该文件。  
 
 ## 4. 为什么不能每轮随便切模型？
 
@@ -103,11 +105,13 @@ Gateway 每个 session 缓存一个 agent instance（LRU 上限加 idle 淘汰�
 
 > 状态是 designed, not enabled；没有任何"auto 已经跑通"的说法；并发隔离是分析结论，不是负载测试结论。  
 
+> KILL 这条线是硬的：`tools/init_state.py` 现在没有任何 `--force`，只要 `KILL` 哨兵还在，初始化器就直接拒绝（exit 2）并且完全写不了状态 —— 想恢复必须先有意把哨兵删掉。  
+
 ## 11. DeepSeek 和 MiMo 如何分工？
 
 按任务需求分，不按品牌分。  
 Fast route 承接清晰、常规、对延迟敏感的工作；capable route 承接 ambiguous、深推理、coding、多文件、长 horizon 和质量关键的工作。  
-两条路线都是先验证再上线：DeepSeek V4.1 Flash 作为生产路径，在 gateway 的真实流量下验证（文本、reasoning、tool calling、多步 tool loop、coding/debugging、模型身份与 context metadata、错误路径）；MiMo V2.6 Pro 作为 alternative route 走 M1–M6 六项矩阵，在全部通过之前它一直标着 `MIMO_AVAILABLE = False`。  
+两条路线都是先验证再上线：DeepSeek V4.1 Flash 作为生产路径，在 gateway 的真实流量下验证（文本、reasoning、tool calling、多步 tool loop、coding/debugging、模型身份与 context metadata、错误路径）；MiMo V2.6 Pro 作为 alternative route 走 M1–M6 六项矩阵，在通过验证并由操作者按 `JEV_AVAILABLE_ROUTES` 显式配置之前，它不会被算作可执行路由（可用性来自显式配置，公开默认为空，未知名被忽略）。  
 验证只看 provider 自己上报的 usage/session metadata，不看配置字符串 —— 配置说用了谁不算证据。  
 
 > M6 里"provider 不可达"那一支没有声称通过：容器的 host 解析无法在不碰共享网络的前提下隔离，所以只跑了注入式凭据失败和 mock 的分类验证。M4 第一次也不达标（"两步"被一条组合命令满足了），重写成第二步依赖第一步之后才通过 —— 未验证的就报未验证。  
@@ -115,7 +119,7 @@ Fast route 承接清晰、常规、对延迟敏感的工作；capable route 承�
 ## 12. 这个项目下一步是什么？
 
 先把 G1 走完：积累足够的真实流量样本，用分布去评估 sticky 规则 —— challenger 赢的 margin 分布、task class 与 JEV choice 的相关性、confidence 卡在阈值附近的频率、以及每次切换会付出多少 cache 成本。  
-`would_execute` 这个字段就是为此存在的：规则可以在真实 turn 上离线评估，一条都不用真的切。  
+`would_execute` 这个字段就是为此存在的：规则可以在真实 turn 上离线评估，一条都不用真的切（可用路由必须先在 `JEV_AVAILABLE_ROUTES` 里显式配置；没有配置任何路由时这个字段就是 `null`）。  
 之后是 G2（设置 approval flag，验证 breaker、lease、heartbeat）、G3（并发实证测试，以及负载下演练 kill switch）、G4（在有界窗口 `auto_until` 内开启 auto，且 sticky routing 生效）。  
 在这一版里，状态文件写 `auto` 也不会真的自治：模式先回落成 `shadow`，mode audit log 里记一条 `auto_not_implemented` —— 在 G4 之前，"开关"和"行为"是分开的两件事。  
 

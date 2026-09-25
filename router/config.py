@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import time
 
 # Hermes stores its state under HERMES_HOME (default: /opt/data in the container).
@@ -25,7 +26,14 @@ DEFAULTS = {
     'JEV_MIN_CONFIDENCE': '0.65',
     'JEV_MIN_MARGIN': '0.15',
     'JEV_TIMEOUT_SECONDS': '3',
+    # Route availability is configured, never assumed: empty means "no route has been
+    # validated for this deployment" (see available_routes()).
+    'JEV_AVAILABLE_ROUTES': '',
 }
+
+# Canonical route names the decision service can emit. Adding a future route means
+# adding its name here and to JEV_AVAILABLE_ROUTES — no other code change.
+KNOWN_ROUTES = ('deepseek_flash', 'mimo_pro')
 
 _AUTO_APPROVAL_KEYS = {'JEV_AUTO_APPROVED'}
 _APPROVED_VALUES = {'1', 'true', 'yes', 'on'}
@@ -84,6 +92,23 @@ def mode() -> str:
 
 def auto_requested_but_blocked() -> bool:
     return bool(_cache['mode_warning']) and (raw('ROUTER_MODE').strip().lower() == 'auto')
+
+
+def available_routes() -> tuple:
+    """Routes this deployment has configured **and** independently validated.
+
+    Resolved from ``JEV_AVAILABLE_ROUTES`` (comma or space separated). The public
+    default is **empty**: this repository never assumes an alternative provider works,
+    so a route only counts as executable once an operator names it here after
+    validation. Unknown names are ignored rather than trusted.
+    """
+    value = str(raw('JEV_AVAILABLE_ROUTES', '') or '')
+    out = []
+    for part in re.split(r'[,\s]+', value.strip()):
+        name = part.strip().lower()
+        if name and name in KNOWN_ROUTES and name not in out:
+            out.append(name)
+    return tuple(out)
 
 
 def min_confidence() -> float:

@@ -9,9 +9,11 @@ Design constraints
   probabilities, latency, token usage and a fixed set of task-feature flags. The
   user's message, the dossier body, credentials, memory and tool output are never
   written to the log.
-* ``MIMO_AVAILABLE`` records whether the alternative backend passed independent
-  end-to-end validation. Until it does, the simulated decision can only fall back
-  to the fast route.
+* Which routes a future auto mode may execute comes from the deployment's own
+  configuration (``JEV_AVAILABLE_ROUTES``, see :func:`router.config.available_routes`).
+  The public default is empty, so a record never implies a provider that was not
+  configured and validated for that deployment: with nothing available the honest value
+  is ``would_execute: null``, never a guess at a route that may not exist.
 """
 from __future__ import annotations
 
@@ -23,8 +25,9 @@ from datetime import datetime, timezone
 
 from . import client, config
 
-MIMO_AVAILABLE = True   # set True only after the alternate route passes M1-M5 validation
-
+# Route availability is deliberately not a constant here: it is read from the
+# deployment's configuration (router.config.available_routes), whose public default is
+# empty, so nothing in this module can assume an alternative provider works.
 _q: "queue.Queue" = queue.Queue(maxsize=8)
 _worker_started = False
 _lock = threading.Lock()
@@ -36,15 +39,12 @@ def _ensure_dirs():
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def simulate(decision: dict) -> str:
-    """Map a JEV decision onto the route a future auto mode *would* execute.
-
-    This is recorded only. Nothing here changes the executing model.
-    """
+def _preferred_route(decision: dict) -> str:
+    """The route the auto rule would pick, before availability is considered."""
     if not decision.get('ok'):
         # Fail-open policy: an unusable decision is never allowed to route work to
         # a weaker route silently, so it is attributed to the capable route.
-        return 'mimo_pro' if MIMO_AVAILABLE else 'deepseek_flash'
+        return 'mimo_pro'
     probs = decision.get('probabilities') or {}
     ranked = sorted(probs.values(), reverse=True)
     p1 = ranked[0] if ranked else 0.0
@@ -54,9 +54,32 @@ def simulate(decision: dict) -> str:
         target = 'mimo_pro'
     if (p1 - p2) < config.min_margin():
         target = 'mimo_pro'
-    if target == 'mimo_pro' and not MIMO_AVAILABLE:
-        return 'deepseek_flash'
     return target
+
+
+def _executable_route(preferred):
+    """Map a preference onto a route this deployment may actually execute.
+
+    Only routes named in ``JEV_AVAILABLE_ROUTES`` count as executable, and that list is
+    empty by default: a route has to be configured *and* validated before a record may
+    present it as executable. When nothing is configured, ``None`` is recorded — the
+    honest answer — instead of naming a provider that was never validated.
+    """
+    available = config.available_routes()
+    if preferred and preferred in available:
+        return preferred
+    if 'deepseek_flash' in available:
+        # Conservative fallback: the route that *is* configured, never the unvalidated one.
+        return 'deepseek_flash'
+    return None
+
+
+def simulate(decision: dict):
+    """Return the route a future auto mode would execute, or ``None``.
+
+    Recorded only. Nothing here changes the executing model.
+    """
+    return _executable_route(_preferred_route(decision))
 
 
 def _write(record: dict):
@@ -69,11 +92,13 @@ def _write(record: dict):
                 f"confidence={record.get('confidence')} "
                 f"p_deepseek={record.get('p_deepseek')} p_mimo={record.get('p_mimo')} "
                 f"latency_ms={record.get('latency_ms')} actual={record.get('actual_model')} "
-                f"would_execute={record.get('would_execute')}")
+                f"would_execute={record.get('would_execute')} "
+                f"available={','.join(config.available_routes()) or 'none'}")
     else:
         line = (f"[ROUTER-SHADOW] route={record.get('route')} "
                 f"error={record.get('error')} actual={record.get('actual_model')} "
-                f"would_execute={record.get('would_execute')}")
+                f"would_execute={record.get('would_execute')} "
+                f"available={','.join(config.available_routes()) or 'none'}")
     with open(config.human_log_path(day), 'a') as f:
         f.write(line + '\n')
 
@@ -181,7 +206,8 @@ def log_privacy_fallback(*, turn_id=None, actual_model=None, reason='unsafe_reda
            'confidence': None, 'p_deepseek': None, 'p_mimo': None, 'latency_ms': 0,
            'input_tokens': None, 'output_tokens': None, 'success': True,
            'error': reason, 'actual_model': actual_model,
-           'would_execute': 'deepseek_flash', 'mode': 'shadow'}
+           # Nothing was routed at all, so no route may be presented as executable.
+           'would_execute': None, 'mode': 'shadow'}
     with _lock:
         _stats['turns'] += 1
         _stats['privacy_fallback'] += 1

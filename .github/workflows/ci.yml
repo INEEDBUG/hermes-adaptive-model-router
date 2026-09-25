@@ -30,8 +30,16 @@ jobs:
       - name: kill-switch resolver tests
         run: python3 tests/test_state.py
 
+      - name: secret-scanner control tests (positive / negative / adversarial)
+        run: python3 tests/test_secret_scan.py
+
+      - name: installer tests (fake hermes CLI, throwaway HERMES_HOME)
+        run: bash tests/test_installer.sh
+
       - name: state initialiser (dry run)
         run: python3 tools/init_state.py --dry-run
 
-      - name: secret / privacy scan
+      # The scan must be able to fail, and "clean" must mean "everything was scanned":
+      # a bare scan that cannot run history, or leaves objects unread, is not a pass.
+      - name: secret / privacy scan (tree + history, fail on incomplete)
         run: python3 tools/secret_scan.py --root . --git

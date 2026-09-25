@@ -7,7 +7,7 @@ service.
 """
 from __future__ import annotations
 
-from . import redact
+from . import config, redact
 
 MAX_TURN_CHARS = 1200
 
@@ -46,6 +46,9 @@ def build(user_message: str, *, previous_failures: int = 0, verification_failed:
     low = turn.lower()
     n = len(turn)
     length = 'short' if n < 200 else ('medium' if n < 1000 else 'long')
+    # Routes this deployment has validated. Empty by default, so the public default
+    # never tells the decision service that an unvalidated provider is usable.
+    routes = list(available_routes) if available_routes is not None else list(config.available_routes())
     return {
         'task': {'current_turn': turn, 'length': length},
         'requirements': {
@@ -65,5 +68,5 @@ def build(user_message: str, *, previous_failures: int = 0, verification_failed:
             'previous_failures': int(previous_failures),
             'verification_failed': bool(verification_failed),
         },
-        'available_routes': list(available_routes or ['deepseek_flash', 'mimo_pro']),
+        'available_routes': routes,
     }, meta

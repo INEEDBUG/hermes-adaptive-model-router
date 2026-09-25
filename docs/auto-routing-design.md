@@ -117,7 +117,9 @@ evaluated on: how often the challenger wins by a large margin, how correlated th
 task class is with the JEV choice, how often confidence sits near the threshold, and
 how expensive the switches would have been. `would_execute` already records what auto
 mode *would* have done, so the rule can be evaluated offline against real turns
-before any of them is switched.
+before any of them is switched. It is deliberately restricted to the routes the
+deployment configured in `JEV_AVAILABLE_ROUTES` (empty by default): assuming a provider
+exists is exactly how an unvalidated route reaches production.
 
 ## Rollout gates
 

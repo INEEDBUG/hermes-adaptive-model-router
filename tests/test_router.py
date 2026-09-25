@@ -20,6 +20,17 @@ sys.path.insert(0, str(ROOT))
 
 from router import client, config, dossier, redact, shadow  # noqa: E402
 
+# Keep the offline suite hermetic: no ambient .env file may influence an assertion.
+# An explicitly opted-in live run (RUN_LIVE_TESTS=1) is allowed to read the configured
+# credential file, which is the whole point of opting in.
+if os.environ.get('RUN_LIVE_TESTS') == '1':
+    _env_file = os.environ.get('HERMES_ENV_PATH')
+    if _env_file:
+        config.ENV_PATH = pathlib.Path(_env_file)
+else:
+    config.ENV_PATH = ROOT / 'tests' / 'nonexistent.env'
+config._cache['at'] = 0
+
 R = []
 
 
@@ -62,6 +73,18 @@ chk('B4 risk flags detected', d2['risk']['destructive_action'] and d2['risk']['p
 long_turn, _ = dossier.build('x' * 5000)
 chk('B5 truncation enforced (<=1300)', len(long_turn['task']['current_turn']) <= 1300,
     f"len={len(long_turn['task']['current_turn'])}")
+# Route availability is configured, never assumed: the public default advertises none.
+os.environ.pop('JEV_AVAILABLE_ROUTES', None)
+config._cache['at'] = 0
+chk('B6 no route is advertised by default', d['available_routes'] == [],
+    f"routes={d['available_routes']}")
+os.environ['JEV_AVAILABLE_ROUTES'] = 'deepseek_flash'
+config._cache['at'] = 0
+_b7, _ = dossier.build('x')
+chk('B7 only configured routes are advertised', _b7['available_routes'] == ['deepseek_flash'],
+    f"routes={_b7['available_routes']}")
+os.environ.pop('JEV_AVAILABLE_ROUTES', None)
+config._cache['at'] = 0
 
 print('=== C. ROUTER_MODE and the auto approval gate ===')
 os.environ.pop('JEV_AUTO_APPROVED', None)
@@ -81,7 +104,7 @@ os.environ.pop('ROUTER_MODE')
 config._cache['at'] = 0
 chk('C-default = shadow', config.mode() == 'shadow', f"got={config.mode()}")
 
-print('=== D. simulated future auto rules (recorded only) ===')
+print('=== D. route availability and the simulated auto rule (recorded only) ===')
 cases = [
     ({'ok': True, 'choice': 'deepseek_flash', 'confidence': 0.90,
       'probabilities': {'deepseek_flash': 0.90, 'mimo_pro': 0.10}}, 'deepseek_flash'),
@@ -91,13 +114,48 @@ cases = [
       'probabilities': {'mimo_pro': 0.95, 'deepseek_flash': 0.05}}, 'mimo_pro'),
     ({'ok': False, 'error': 'timeout'}, 'mimo_pro'),
 ]
-for i, (dec, expect) in enumerate(cases, 1):
-    got = shadow.simulate(dec)
-    chk(f'D{i} would_execute={expect}', got == expect, f'got={got}')
-chk('D-MiMo validated -> MIMO_AVAILABLE=True', shadow.MIMO_AVAILABLE is True)
-shadow.MIMO_AVAILABLE = False
-chk('D5 falls back to the fast route when unavailable', shadow.simulate(cases[2][0]) == 'deepseek_flash')
-shadow.MIMO_AVAILABLE = True
+
+
+def set_routes(value):
+    if value is None:
+        os.environ.pop('JEV_AVAILABLE_ROUTES', None)
+    else:
+        os.environ['JEV_AVAILABLE_ROUTES'] = value
+    config._cache['at'] = 0
+    return config.available_routes()
+
+
+# The public default: nothing is validated, so nothing may be presented as executable.
+set_routes(None)
+chk('D1 default = no route configured as executable', config.available_routes() == ())
+_guesses = [shadow.simulate(dec) for dec, _pref in cases]
+chk('D2 unconfigured -> would_execute is None for every outcome (never a guess)',
+    all(g is None for g in _guesses), f'got={_guesses}')
+set_routes('mimo_pro, luna_pro')
+chk('D3 unknown route names are ignored, not trusted',
+    config.available_routes() == ('mimo_pro',), f'routes={config.available_routes()}')
+
+# Only the production route configured: the rule may prefer the capable route, but a
+# record must never claim the unvalidated one is executable.
+set_routes('deepseek_flash')
+chk('D4 fast-only: capable preference falls back to the configured route',
+    shadow.simulate(cases[2][0]) == 'deepseek_flash', f'got={shadow.simulate(cases[2][0])}')
+chk('D5 fast-only: fail-open attribution respects availability too',
+    shadow.simulate(cases[3][0]) == 'deepseek_flash')
+
+# Both routes configured and validated: the rule's preference is honoured.
+set_routes('deepseek_flash,mimo_pro')
+chk('D6 both configured -> the capable route is executable',
+    shadow.simulate(cases[2][0]) == 'mimo_pro', f'got={shadow.simulate(cases[2][0])}')
+chk('D7 both configured -> the fast route is still chosen when the rule prefers it',
+    shadow.simulate(cases[0][0]) == 'deepseek_flash')
+chk('D8 low confidence still escalates to the capable route',
+    shadow.simulate(cases[1][0]) == 'mimo_pro')
+chk('D9 fail-open attribution reaches the capable route',
+    shadow.simulate(cases[3][0]) == 'mimo_pro')
+chk('D10 no hard-coded availability flag remains in the module',
+    not hasattr(shadow, 'MIMO_AVAILABLE'))
+set_routes(None)
 
 print('=== E. fault injection: unreachable / bad credential / malformed ===')
 os.environ['TYPESAFE_BASE_URL'] = 'http://127.0.0.1:9'

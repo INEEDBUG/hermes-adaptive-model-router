@@ -11,8 +11,12 @@
 #   1. copies plugin/ into  $HERMES_HOME/plugins/jev-shadow-router
 #   2. persists JEV_ROUTER_ROOT in $HERMES_HOME/.env  (append-only; never overwrites)
 #   3. MERGES 'jev-shadow-router' into plugins.enabled  (never replaces the list)
+#      — config.yaml is backed up immediately before the first write
 #   4. initialises the runtime state file (mode.json) — mode.json is authoritative,
 #      and a missing file means the plugin stays off
+#
+# Every file this script touches is backed up first, and if a backup cannot be made the
+# script refuses to modify the original. Backups are listed at the end of the run.
 #
 # Usage:
 #   ./tools/install_plugin.sh [--hermes-home /opt/data] [--dry-run]
@@ -32,7 +36,7 @@ while [ $# -gt 0 ]; do
     --dry-run)     DRY_RUN=1; shift ;;
     --no-state)    INIT_STATE=0; shift ;;
     --state-mode)  STATE_MODE="$2"; shift 2 ;;
-    -h|--help)     sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help)     awk 'NR>1 && /^set -euo/{exit} NR>1' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -40,6 +44,32 @@ done
 say()  { printf '  %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 run()  { if [ "$DRY_RUN" = "1" ]; then say "[dry-run] $*"; else eval "$@"; fi; }
+
+# Back up a file before this script modifies it. Non-zero return means "no backup, do
+# not modify the original", so "backed up first" is a property of the code rather than
+# a promise in the README.
+BACKUPS=""
+backup_file() {
+  local f="$1" ts b
+  if [ ! -f "$f" ]; then
+    say "no $f yet (nothing to back up)"
+    return 0
+  fi
+  ts="$(date +%Y%m%d%H%M%S)"
+  b="$f.bak.$ts"
+  if [ "$DRY_RUN" = "1" ]; then
+    say "[dry-run] would back up $f -> $b"
+    BACKUPS="$BACKUPS $b"
+    return 0
+  fi
+  if cp -p "$f" "$b" 2>/dev/null; then
+    say "backed up $f -> $b"
+    BACKUPS="$BACKUPS $b"
+    return 0
+  fi
+  echo "FATAL: could not back up $f — refusing to modify it." >&2
+  return 70
+}
 
 step "Pre-flight"
 say "repository        : $REPO_ROOT"
@@ -65,7 +95,7 @@ if [ -f "$ENV_FILE" ] && grep -qE '^[[:space:]]*JEV_ROUTER_ROOT=' "$ENV_FILE"; t
     say "NOTE: it points somewhere else. Remove that line and re-run to point at $REPO_ROOT."
   fi
 else
-  run "cp -n '$ENV_FILE' '$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)' 2>/dev/null || true"
+  backup_file "$ENV_FILE" || exit 70
   if [ "$DRY_RUN" = "1" ]; then
     say "[dry-run] would append: JEV_ROUTER_ROOT=$REPO_ROOT"
   else
@@ -81,11 +111,16 @@ say "Hermes loads $ENV_FILE with override=True, so the gateway process receives 
 step "3/4 Enable the plugin (merge, never replace)"
 CONFIG_FILE="$HERMES_HOME/config.yaml"
 if command -v hermes >/dev/null 2>&1; then
-  CURRENT_JSON="$(hermes config get plugins.enabled 2>/dev/null || true)"
+  # Always call the CLI with this HERMES_HOME, so the file it edits is the file that
+  # was just backed up.
+  CURRENT_JSON="$(HERMES_HOME="$HERMES_HOME" hermes config get plugins.enabled 2>/dev/null || true)"
   if [ "$DRY_RUN" = "1" ]; then
+    backup_file "$CONFIG_FILE"
     say "[dry-run] current plugins.enabled: ${CURRENT_JSON:-<unset>}"
     say "[dry-run] would merge '$PLUGIN_NAME' into the existing list and set it back"
   else
+    # Back up before the first write to config.yaml, not after.
+    backup_file "$CONFIG_FILE" || exit 70
     MERGED="$(PLUGIN_NAME="$PLUGIN_NAME" CURRENT_JSON="$CURRENT_JSON" python3 - <<'PY'
 import json, os, re, sys
 name = os.environ['PLUGIN_NAME']
@@ -105,11 +140,12 @@ if name not in items:
 print(json.dumps(items))
 PY
 )"
-    hermes config set plugins.enabled "$MERGED" >/dev/null
+    hermes config set plugins.enabled "$MERGED" >/dev/null 2>&1 || HERMES_HOME="$HERMES_HOME" hermes config set plugins.enabled "$MERGED" >/dev/null
     say "plugins.enabled = $MERGED (existing entries preserved)"
   fi
 else
   say "hermes CLI not found on PATH — enable it manually, preserving the existing list:"
+  say "  config file: $CONFIG_FILE  (back it up yourself first)"
   say "  in $CONFIG_FILE:  plugins:"
   say "    enabled:"
   say "      - <your existing plugins...>"
@@ -134,3 +170,9 @@ say "python3 $REPO_ROOT/tools/shadow_stats.py    # real turns vs tests, after tr
 say "Restart the gateway so the plugin is loaded and the environment is re-read."
 echo
 echo "Done. Nothing existing was overwritten; .env and config.yaml edits are additive."
+if [ -n "${BACKUPS// /}" ]; then
+  echo "Backups made before any modification:"
+  for b in $BACKUPS; do echo "  $b"; done
+else
+  echo "No file needed a backup (nothing existed yet, or --dry-run made no change)."
+fi

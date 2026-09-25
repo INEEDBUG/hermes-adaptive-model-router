@@ -1,9 +1,11 @@
 # Provider validation
 
 Both routes referenced by the routing criteria were validated before the decision
-service was allowed to include them, and the alternative route stayed marked
-unavailable (`MIMO_AVAILABLE = False`) until every check had passed. Validation used
-provider-reported usage/session metadata rather than configuration strings.
+service was allowed to use them. That fact is configuration, not a constant: a route
+counts as executable only when the deployment names it in `JEV_AVAILABLE_ROUTES`, whose
+public default is **empty** — so a shadow record can never imply a provider that was
+not validated here (with nothing configured, `would_execute` is `null`). Validation
+used provider-reported usage/session metadata rather than configuration strings.
 
 ## Routing service contract
 
@@ -76,15 +78,18 @@ Notes on rigour:
 
 | Run | Checks |
 |---|---|
-| `python3 tests/test_router.py` (default) | 33/33 — pure offline, no network, no credential |
-| `RUN_LIVE_TESTS=1 python3 tests/test_router.py` | 40/40 — adds the live routing group |
-| `python3 tests/test_state.py` | 21/21 — kill-switch resolver, offline |
+| `python3 tests/test_router.py` (default) | 39/39 — pure offline, no network, no credential |
+| `RUN_LIVE_TESTS=1 python3 tests/test_router.py` | 46/46 — adds the live routing group |
+| `python3 tests/test_state.py` | 26/26 — kill-switch resolver + initialiser boundary, offline |
+| `python3 tests/test_secret_scan.py` | 18/18 — scanner controls: positive, negative, adversarial |
+| `bash tests/test_installer.sh` | 21/21 — stand-in `hermes` CLI, throwaway `HERMES_HOME` |
 
 The live group is **opt-in by flag, not by credential discovery**: a credential merely
 being present on the machine never causes an external call, so the default run is safe
-anywhere. CI (GitHub Actions) runs the two offline suites, the state initialiser in
+anywhere. CI (GitHub Actions) runs all four suites, the state initialiser in
 `--dry-run` mode and the dependency-free secret scan on every push, with no secrets
-configured.
+configured. The scan is built to fail: findings exit 1, and objects left unscanned
+(over the size cap) exit 3 rather than reporting clean.
 
 ## What is deliberately not claimed
 

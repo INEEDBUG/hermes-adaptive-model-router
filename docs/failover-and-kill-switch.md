@@ -64,6 +64,12 @@ Precedence (first match wins):
 Anything unexpected resolves to `off`; the resolver has no code path that returns
 `auto` by default (asserted by test 17 of the kill-switch suite).
 
+The stop cannot be lifted by tooling. `tools/init_state.py` has no `--force`: while the
+sentinel exists it refuses (exit 2) and writes nothing, so recovery is a deliberate
+`rm $JEV_STATE_DIR/KILL` followed by an explicit re-initialisation — visible in shell
+history, in review, and in the audit log. Tests 21–25 of the kill-switch suite pin that
+behaviour, including that the old flag is rejected.
+
 Operator *intent* is never silently honoured either: the resolver reports `auto` if a
 state file records it, but this release downgrades it to `shadow` in the plugin
 (`router.state.AUTO_IMPLEMENTED` is `False`) and appends `auto_not_implemented` to the

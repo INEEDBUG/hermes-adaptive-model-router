@@ -84,8 +84,9 @@ flowchart TD
 | DeepSeek V4.1 Flash 集成 | **已验证**（文本、推理、工具、多步循环、编码、错误路径） |
 | MiMo V2.6 Pro 集成 | **已验证**（同一套矩阵） |
 | 隐私脱敏 + 隐私 fallback | **已验证** |
-| 运行时 kill switch | **已验证**（21/21 parser 测试，fail-safe = off） |
+| 运行时 kill switch | **已验证**（26/26 parser 测试，fail-safe = off；无 override 标志） |
 | 真实/测试遥测分离 | **已验证** |
+| 路由可用性 | **配置而非假定** —— `JEV_AVAILABLE_ROUTES`；公开默认值为空 |
 | CI（离线套件 + 密钥扫描） | 已在 `.github/workflows/ci.yml` **配置**；无需任何密钥 |
 | 自动 provider 切换 | **设计阶段 —— 未启用** |
 | auto 模式的并发隔离 | **已分析；仍有一项实证测试未完成** |
@@ -120,9 +121,12 @@ flowchart TD
 ```
 router/     the routing library (config, redact, dossier, client, shadow, state)
 plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
-tests/      offline test suites (33 checks offline, 40 with RUN_LIVE_TESTS=1; 21 kill-switch checks)
-tools/      shadow_stats.py (real/test separation) · init_state.py (state file) ·
-            install_plugin.sh (persistent install) · secret_scan.py (CI + local use)
+tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · kill-switch 26 ·
+            scanner controls 18 · installer 21 (fake CLI + throwaway HERMES_HOME)
+tools/      shadow_stats.py (real/test separation) · init_state.py (state file; no
+            override for the kill sentinel) · install_plugin.sh (persistent install,
+            backs up before writing) · secret_scan.py (tree + history; fails when a
+            scan is incomplete)
 docs/       architecture, shadow mode, privacy model, failover, validation, auto design
 examples/   fully synthetic configuration and telemetry samples
 .github/    CI: offline suites + state-init dry run + secret scan (no secrets configured)
@@ -178,6 +182,7 @@ python3 tools/init_state.py --mode off  # stop collecting, keep the installation
 | `JEV_MIN_CONFIDENCE` | `0.65` | 低于该值时，模拟决策会偏向高能力路由 |
 | `JEV_MIN_MARGIN` | `0.15` | top-2 概率的最小间隔 |
 | `JEV_TIMEOUT_SECONDS` | `3` | 路由调用的硬性上限 |
+| `JEV_AVAILABLE_ROUTES` | empty | 本部署已验证过的路由；为空表示没有任何路由，因此不会有记录声称某个未经验证的 provider 是可执行的 |
 | `TYPESAFE_API_KEY` | — | 路由服务的凭据（永不写入日志） |
 | `JEV_STATE_DIR` | `$HERMES_HOME/jev_router/state` | kill sentinel + 状态文件 |
 | `JEV_LOG_DIR` | `$HERMES_HOME/logs/router` | shadow 遥测 |
@@ -198,9 +203,11 @@ session 与故障注入运行都会被归入 excluded 桶并被显式列出，�
 ## 验证结果
 
 ```
-router suite, offline default .... 33/33 checks pass
-router suite, RUN_LIVE_TESTS=1 ... 40/40 checks pass (adds the live routing group)
-kill-switch resolver ............. 21/21 checks pass
+router suite, offline default .... 39/39 checks pass
+router suite, RUN_LIVE_TESTS=1 ... 46/46 checks pass (adds the live routing group)
+kill-switch resolver ............. 26/26 checks pass
+secret-scanner controls .......... 18/18 checks pass (positive, negative, adversarial)
+installer ........................ 21/21 checks pass (fake CLI, throwaway HERMES_HOME)
 production shadow ................ validated through a real messaging gateway
 fail-open ........................ validated under injected failures and
                                    one observed real routing timeout
@@ -208,8 +215,9 @@ fail-open ........................ validated under injected failures and
 
 在线路由组是**显式选择加入（opt-in）**的（`RUN_LIVE_TESTS=1`，外加已配置的凭据）：
 仅仅机器上存在一份凭据永远不会触发第三方调用，因此默认运行完全离线、任何人都能跑。
-CI 会在每次 push 时运行离线套件与密钥扫描，且不配置任何密钥。各 provider 的详细矩阵
-见 `docs/provider-validation.md`。
+CI 会在每次 push 时运行全部四个套件、状态初始化器的 dry run 以及密钥扫描，且不配置任何
+密钥。该扫描的设计就是要失败：发现即退出码 1，若有对象未被扫描（超出大小上限）则退出码 3，
+而不是报告为干净。各 provider 的详细矩阵见 `docs/provider-validation.md`。
 
 ## 隐私与安全
 
@@ -237,6 +245,9 @@ approval + lease + heartbeat。任何不可读、损坏或缺失的内容都会�
 - sticky routing 所需的上下文规模信号**今天并未被采集**：`dossier_token_estimate`
   度量的是路由输入，而不是 Agent 的对话上下文，也不是 provider 的 prompt cache。
   未来的 auto 版本必须先采集该运行时信号，才能评估切换规则。
+- 路由可用性是**配置而来，不是被发现的**：当 `JEV_AVAILABLE_ROUTES` 为空（公开默认值）
+  时没有任何路由可执行，因此 `would_execute` 会被记录为 `null`，而不是写出一个从未被
+  验证过的 provider 名字。
 - 来自小规模真实流量样本的统计只以分布形式报告。
 
 ## License
