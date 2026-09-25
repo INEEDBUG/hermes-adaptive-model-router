@@ -29,8 +29,9 @@ wrong price somewhere:
 
 ## Solution
 
-Route with a **decision service that sees almost nothing**, and act on the decision
-only after the routing layer has proven itself on real traffic.
+Route with a **decision service that receives only a sanitised fragment of the
+current turn**, and act on the decision only after the routing layer has proven
+itself on real traffic.
 
 ```mermaid
 flowchart TD
@@ -68,7 +69,10 @@ explicit approval flag that the code checks itself.
 
 1. **Lowest sufficient model.** Route by task requirements, not by habit.
 2. **Privacy by design.** The routing service receives a redacted, truncated dossier
-   derived from the current turn — never memory, history, tool output or credentials.
+   derived from the current turn and nothing else: no memory, no conversation
+   history, no tool output, no file contents, no credentials. Be precise about what
+   that means — the sanitised turn text *is* transmitted, and redaction is
+   deterministic pattern matching, **not** a confidentiality or DLP guarantee.
 3. **Fail-open.** A routing layer that can break the agent is worse than no routing
    layer. Timeouts, HTTP errors and malformed responses are classified and dropped.
 4. **No single point of failure.** The decision service is strictly advisory; the
@@ -88,6 +92,7 @@ explicit approval flag that the code checks itself.
 | Privacy redaction + privacy fallback | **Validated** |
 | Runtime kill switch | **Validated** (21/21 parser tests, fail-safe = off) |
 | Real/test telemetry separation | **Validated** |
+| CI (offline suites + secret scan) | **Configured** in `.github/workflows/ci.yml`; no secrets required |
 | Automatic provider switching | **Design stage — not enabled** |
 | Concurrency isolation for auto mode | **Analyzed; one empirical test still outstanding** |
 
@@ -126,10 +131,12 @@ numbers.
 ```
 router/     the routing library (config, redact, dossier, client, shadow, state)
 plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
-tests/      offline test suites (33 routing checks, 21 kill-switch checks)
-tools/      production statistics with real/test sample separation
+tests/      offline test suites (33 checks offline, 40 with RUN_LIVE_TESTS=1; 21 kill-switch checks)
+tools/      shadow_stats.py (real/test separation) · init_state.py (state file) ·
+            install_plugin.sh (persistent install) · secret_scan.py (CI + local use)
 docs/       architecture, shadow mode, privacy model, failover, validation, auto design
 examples/   fully synthetic configuration and telemetry samples
+.github/    CI: offline suites + state-init dry run + secret scan (no secrets configured)
 ```
 
 ## Quick start
@@ -138,23 +145,49 @@ examples/   fully synthetic configuration and telemetry samples
 git clone https://github.com/INEEDBUG/hermes-adaptive-model-router
 cd hermes-adaptive-model-router
 
-# 1. try it without touching a running agent
-JEV_LOG_DIR=/tmp/jev-shadow-logs python3 tests/test_router.py
+# 1. run the suites — offline by default: no credential, no network, no side effects
+python3 tests/test_router.py
 python3 tests/test_state.py
 
-# 2. install as a Hermes plugin
-cp -r plugin "$HERMES_HOME/plugins/jev-shadow-router"
-export JEV_ROUTER_ROOT="$PWD"          # lets the plugin import the router package
-#   then enable it for the gateway (Hermes config):
-#   hermes config set plugins.enabled '["jev-shadow-router"]'
+# 2. install persistently (idempotent; merges plugins.enabled, never replaces it)
+./tools/install_plugin.sh --hermes-home "$HERMES_HOME" --dry-run   # inspect first
+./tools/install_plugin.sh --hermes-home "$HERMES_HOME"
+#    then restart the gateway so the plugin is loaded and the environment is re-read
 ```
+
+The installer copies the plugin into `$HERMES_HOME/plugins/`, **persists**
+`JEV_ROUTER_ROOT` in the Hermes `.env` (append-only, never overwriting an existing
+value), **merges** `jev-shadow-router` into the existing `plugins.enabled` list, and
+initialises the runtime state file. Every file it touches is backed up first, and
+`--dry-run` prints the actions without performing them.
+
+### Runtime authority: the state file, not `ROUTER_MODE`
+
+The plugin resolves its mode **once per turn from the state file**
+(`$JEV_STATE_DIR/mode.json`). A **missing, unreadable or corrupt state file resolves
+to `off`** — fail-safe, deliberately. `ROUTER_MODE` is only a default used inside the
+library's configuration helper; it is *not* the runtime switch, so setting
+`ROUTER_MODE=shadow` on its own collects nothing.
+
+Collection must be enabled explicitly, and the tool refuses to write while a `KILL`
+sentinel is present:
+
+```bash
+python3 tools/init_state.py             # writes mode=shadow atomically
+python3 tools/init_state.py --dry-run   # prints the paths and the decision, writes nothing
+python3 tools/init_state.py --mode off  # stop collecting, keep the installation
+```
+
+`auto` is never written by that tool: automatic switching is not implemented in this
+release, and if a state file records it the plugin resolves it to `shadow` and appends
+an `auto_not_implemented` entry to the mode audit log.
 
 Configuration is environment-first, then `.env`, then built-in defaults
 (see `examples/config.example.env`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ROUTER_MODE` | `shadow` | `off` / `shadow` (auto requires explicit approval) |
+| `ROUTER_MODE` | `shadow` | default used by `router/config.py` only; **not** the runtime switch (see above) |
 | `JEV_AUTO_APPROVED` | unset | explicit approval gate for `auto`; unset forces `shadow` |
 | `JEV_MODEL` | `jev-latest` | routing model alias |
 | `JEV_MIN_CONFIDENCE` | `0.65` | below this the simulated decision prefers the capable route |
@@ -168,8 +201,9 @@ Configuration is environment-first, then `.env`, then built-in defaults
 
 `tools/shadow_stats.py` reports `real_turns`, route counts and shares, confidence
 (mean/median/p10/p90), probability margin distribution, JEV latency
-(mean/p50/p95/max), timeout/error counts, privacy fallbacks and task-category /
-context-size breakdowns per route.
+(mean/p50/p95/max), timeout/error counts, privacy fallbacks, and task-category plus
+**Routing Dossier size buckets** per route — the bucket is a routing-input-size proxy,
+not the agent's conversation-context or prompt-cache size.
 
 Real turns are separated from everything else: a record only counts as production
 traffic when the session embedded in its `turn_id` exists in the Hermes session
@@ -180,15 +214,18 @@ they can never inflate production statistics.
 ## Validation
 
 ```
-router offline + live groups ..... 33/33 checks pass
+router suite, offline default .... 33/33 checks pass
+router suite, RUN_LIVE_TESTS=1 ... 40/40 checks pass (adds the live routing group)
 kill-switch resolver ............. 21/21 checks pass
 production shadow ................ validated through a real messaging gateway
 fail-open ........................ validated under injected failures and
                                    one observed real routing timeout
 ```
 
-The live routing group performs a real decision call and is skipped automatically
-when no credential is configured, so the suite is runnable by anyone. See
+The live routing group is **opt-in** (`RUN_LIVE_TESTS=1`, plus a configured
+credential): a credential merely being present on the machine never triggers a
+third-party call, so the default run is fully offline and runnable by anyone. CI runs
+the offline suites and the secret scan on every push with no secrets configured. See
 `docs/provider-validation.md` for the per-provider matrix.
 
 ## Privacy and security
@@ -215,6 +252,10 @@ approval + lease + heartbeat. Anything unreadable, corrupt or missing resolves t
   switching is therefore treated as a cost, not a feature (see the auto design doc).
 - Auto mode has **no** completed concurrency test yet; the isolation requirements it
   must satisfy first are documented, not assumed.
+- The context-size signal that sticky routing needs is **not collected today**:
+  `dossier_token_estimate` measures the routing input, not the agent's conversation
+  context or the provider's prompt cache. A future auto release must collect that
+  runtime signal before the switching rule can be evaluated.
 - Statistics from a small real-traffic sample are reported as distributions only.
 
 ## License

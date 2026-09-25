@@ -50,11 +50,10 @@ def redact(text: str) -> tuple:
     hits = 0
     for kind, rx in PATTERNS:
         if kind == 'kv_secret':
-            def _sub(m):
-                nonlocal hits
-                hits += 1
-                return f'{m.group(1)}=[REDACTED]'
-            out, n = rx.subn(_sub, out)
+            # Keep the key name, drop the value. The match is counted once by the
+            # shared ``hits += n`` below; the substitution callback must not count,
+            # otherwise ``kv_secret`` matches would be counted twice.
+            out, n = rx.subn(lambda m: f'{m.group(1)}=[REDACTED]', out)
         else:
             out, n = rx.subn(REPLACEMENTS[kind], out)
         if n:

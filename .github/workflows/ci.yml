@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    name: offline tests + secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the secret scan also walks committed content
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No third-party dependencies and no credentials: the suites are stdlib-only
+      # and the live routing group is opt-in (RUN_LIVE_TESTS), so CI can never call
+      # an external service even if a runner happened to carry a credential.
+      - name: router tests (offline)
+        run: python3 tests/test_router.py
+
+      - name: kill-switch resolver tests
+        run: python3 tests/test_state.py
+
+      - name: state initialiser (dry run)
+        run: python3 tools/init_state.py --dry-run
+
+      - name: secret / privacy scan
+        run: python3 tools/secret_scan.py --root . --git

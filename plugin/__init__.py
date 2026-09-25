@@ -49,19 +49,43 @@ def _first_call_of_turn(kwargs: dict) -> bool:
     return False
 
 
-def _resolve_mode() -> str:
-    """Resolve the runtime mode once per turn; any problem means ``off``.
+def _effective_mode(res: dict) -> str:
+    """Map a resolution result onto the mode this release can actually honour.
 
-    This is the shadow switch only: it does not touch provider or model selection.
+    ``auto`` is not implemented here (``router.state.AUTO_IMPLEMENTED`` is False):
+    it is downgraded to ``shadow`` and audited, so no telemetry record or operator
+    view can suggest that automatic model switching took place.
+    """
+    mode = res.get('mode')
+    if mode not in ('off', 'shadow', 'auto'):
+        return 'off'
+    if mode == 'auto':
+        try:
+            from router import state as router_state
+
+            return 'shadow' if not router_state.AUTO_IMPLEMENTED else 'auto'
+        except Exception:
+            return 'shadow'          # fail-safe: never honour auto without evidence
+    return mode
+
+
+def _resolve_mode() -> str:
+    """Resolve the effective runtime mode once per turn; any problem means ``off``.
+
+    The state file (``mode.json``) is authoritative; this is the shadow switch only
+    and never touches provider or model selection.
     """
     try:
         from router import state as router_state
 
         res = router_state.resolve()
-        if res.get('source') != 'file':
-            router_state.audit({'event': 'mode_resolution', **res})
-        m = res.get('mode')
-        return m if m in ('off', 'shadow', 'auto') else 'off'
+        eff = _effective_mode(res)
+        if res.get('source') != 'file' or eff != res.get('mode'):
+            router_state.audit({'event': 'mode_resolution', 'recorded_mode': res.get('mode'),
+                                'effective_mode': eff, 'source': res.get('source'),
+                                'reason': res.get('reason'),
+                                'note': None if eff == res.get('mode') else 'auto_not_implemented'})
+        return eff
     except Exception:
         return 'off'
 

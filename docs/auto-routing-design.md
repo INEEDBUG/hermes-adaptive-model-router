@@ -101,6 +101,15 @@ Per-session state needed by the rule: current route, previous route, turns since
 last switch, rolling confidence/margin, context size estimate, provider failure count
 and the last decision source. All of it is session-local.
 
+**Not yet measurable.** `context size` in the rule above means the agent's live
+conversation context, and the current telemetry does **not** measure it:
+`dossier_token_estimate` describes the routing input only
+
+— the sanitised dossier, not the agent's context or the provider's prompt cache. Real
+context/cache sizes, and therefore the true switching cost, are runtime signals that a
+future auto release has to collect before this rule can be evaluated on real traffic.
+Until they are collected, the rule stays a design sketch and auto stays off.
+
 ## Observability before autonomy
 
 The same telemetry that shadow mode produces is what a decision rule must be

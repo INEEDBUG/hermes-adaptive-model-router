@@ -1,8 +1,10 @@
 # JEV Shadow Router 技术面试问答笔记
 
 这是一份口述笔记：每节先给一段可以照着说出口的参考回答，再给必要的事实边界。  
-所有数字只来自离线测试与真实验证记录（33/33 routing checks、21/21 kill-switch checks、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
+所有数字只来自离线测试与真实验证记录（33/33 离线检查（live 组 opt-in 后 40/40）、21/21 kill-switch checks、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
 `>` 开头的是边界声明，说明哪一条是读源码分析出来的、哪一条是实测过的 —— 面试时说清这条，比多抛一个数字更有说服力。
+
+> 测试默认完全离线：live 组只有显式设置 `RUN_LIVE_TESTS=1` 时才发起真实调用（本机恰好有凭据不会触发）。offline by default; the live group only runs with `RUN_LIVE_TESTS=1`, so a credential present on the machine never triggers a third-party call.  
 
 ## 1. 为什么需要 JEV（为什么不自己做规则/分类器）？
 
@@ -26,10 +28,13 @@ JEV 以 `choice` 问题返回 choice、confidence 和 probabilities，这个校�
 
 因为路由层同时提出了两个命题："我的决策是对的"和"照着我的决策执行是安全的"。只有第一个能在不碰生产的前提下被评估。  
 Shadow 模式下插件只注册一个 observer hook（`pre_api_request`），hook 永远返回 `None`，所以请求内容一个字节都不变；决策被记录，执行模型仍由 gateway 自己的配置决定，生产路径还是 DeepSeek V4.1 Flash。  
+运行模式也不是由环境变量决定的：**状态文件 `mode.json` 是权威**，每轮解析一次；文件缺失、损坏或不可读一律解析成 `off`（fail-safe），所以单独设一个 `ROUTER_MODE=shadow` 并不会打开采集。  
 记录里同时有 `actual_model`（真正执行的是谁）和 `would_execute`（未来的 auto 会选谁），所以任何决策规则都能事后离线评估，不用先切一次生产。  
 这就是 observable before automatic：先统计，再规则，最后才是自主。  
 
 > auto 目前是 design stage，未启用；启用需要代码自己检查的显式 approval flag。  
+> 这一版把状态文件里记录的 `auto` 降级成 `shadow`，并往 mode audit log 写一条 `auto_not_implemented`，所以 telemetry 和运维视图都不会显示出 auto 跑过。  
+> 安装脚本 `tools/install_plugin.sh` 把 `JEV_ROUTER_ROOT` 持久化进 Hermes 的 `.env`，对 `plugins.enabled` 是 merge 而不是 replace —— 已有插件条目会保留。  
 
 ## 4. 为什么不能每轮随便切模型？
 
@@ -40,15 +45,16 @@ Shadow 模式下插件只注册一个 observer hook（`pre_api_request`），hoo
 所以 router 必须 sticky：confidence ≥ 0.75、margin ≥ 0.30、challenger 连续赢 ≥ 2 轮、cooldown ≥ 5 轮或 ≥ 10 分钟、context < 20k tokens、且 task class 确实变了 —— 全部满足才切，否则维持现状。  
 
 > 这套规则在文档里是 informative 的，尚未实现，也没有做过负载测试。per-turn flipping 是成本，不是特性。  
+> 其中 `context < 20k tokens` 依赖一个目前并未采集的信号：`dossier_token_estimate` 只是 Routing Dossier（路由输入）大小的代理，真实 conversation context 与 prompt cache 大小属于运行时信号，需要 future auto 版本单独采集 —— 现在没有采集，所以这个阈值目前还只是设计值。  
 
 ## 5. Prompt Cache 对成本有什么影响？
 
 Provider 会缓存对话前缀，而切换会让这个缓存失效 —— 新 provider 全量重算，旧 provider 的缓存白付。  
 在生产使用里观察到的量级关系是：cached prefix 在每轮 input 中占绝对主导，cached input tokens 比 fresh input tokens 高一到两个数量级。  
 也就是说，一次切换带来的重算成本，可能比这一轮路由本身省下的还多。  
-这正是 hysteresis 里 `context < 20k tokens` 和 cooldown 条件的由来：长线程不动，刚切过的不再切。  
+这正是 hysteresis 里 `context < 20k tokens` 和 cooldown 条件的由来：长线程不动，刚切过的不再切 —— 这里的 context 大小同样是尚未采集的运行时信号。  
 
-> 这里说的是分布与量级关系，不是某个具体金额或节省百分比。  
+> 这里说的是分布与量级关系，不是某个具体金额或节省百分比。上面那个阈值里的 context 大小是尚未采集的运行时信号 —— `dossier_token_estimate` 只量 dossier 本身，并不度量 agent 的对话上下文。  
 
 ## 6. JEV 挂了怎么办？
 
@@ -72,11 +78,11 @@ Fail-open，加上分类。每个失败都被归类：`timeout`、`http_401`、`
 ## 8. 如何保护隐私？
 
 Data minimisation：dossier 只包含当前 turn，确定性 redaction 之后截断到 1200 字符，加上 boolean 的 requirement flags（tool use、shell、coding、debugging、research、long context）和 risk flags（destructive action、production change）。  
-结构性保证比"记得过滤"可靠：dossier builder 的唯一内容入参就是当前 user message，它根本拿不到 memory、history、tool output 或文件内容，更不用说凭据。  
+结构性保证比"记得过滤"可靠：dossier builder 的唯一内容入参就是当前 user message，它拿不到 memory、history、tool output 或文件内容。这里要把"到底收到了什么"说准：服务确实会收到经过 redaction、截断到 1200 字符的当前轮文本，加上 boolean 的 requirement / risk flags；它收不到的才是 history、memory、tool output、文件内容和凭据。  
 Redaction 是本地、离线、正则的：不用模型、不连网，所以它自己不会成为泄露源，覆盖 PEM private key、前缀 API key、Bearer token、`key=value` secret、email、IPv4/IPv6、`user@host` 和长 opaque token。  
 Telemetry 只记录 redaction 的命中次数，不记录内容；字段走固定 allow-list，加一个可能带内容的字段会直接把测试套件跑红。  
 
-> pattern-based redaction 不是 DLP 认证：匹配不到任何模式的 secret 它认不出来，所以这是很强的卫生习惯，不是合规保证。另外最小化不等于不可推断 —— 服务仍然看得到任务形状和请求时序。  
+> 确定性正则 redaction 不是保密保证，也不是 DLP：匹配不到任何模式的 secret 它认不出来，所以这是很强的卫生习惯，而不是合规或保密的承诺。另外最小化不等于不可推断 —— 服务仍然看得到任务形状和请求时序。  
 
 ## 9. 如何处理并发 session？
 
@@ -93,9 +99,9 @@ Gateway 每个 session 缓存一个 agent instance（LRU 上限加 idle 淘汰�
 第一，规则还没有数据支撑：真实流量样本很小，hysteresis 阈值必须先用 shadow 统计去评估，而不是靠直觉定。  
 第二，安全机制还没实证：并发隔离目前是"推断安全、未在负载下验证"，而 restore 的失败路径正是核心残余风险 —— 这也是为什么 future auto 的 override 要由拥有 `finally` 的 turn 编排层来施加，而不是一个本身就没有 `finally` 的 hook。  
 第三，切换本身是负收益风险：cache 失效、runtime 重建、reasoning artifact 冲突都在，没有 sticky 规则就跑 auto，可能比不跑更贵。  
-再加上启用 auto 需要显式 approval flag（代码自己检查）+ 活的 lease（`auto_until`）+ 新鲜 heartbeat（120 s），任意一项不满足都自动退回 shadow —— 改一个配置字符串是开不起来自治的。  
+再加上启用 auto 需要显式 approval flag（代码自己检查）+ 活的 lease（`auto_until`）+ 新鲜 heartbeat（120 s），任意一项不满足都自动退回 shadow —— 改一个配置字符串是开不起来自治的。而且这一版对状态文件里记录的 `auto` 是降级处理的：生效模式回落成 `shadow`，mode audit log 里写一条 `auto_not_implemented`，所以 telemetry 和运维视图上都不会出现"auto 跑过"的痕迹。  
 
-> 状态是 designed, not enabled；没有任何"auto 已经跑通"的说法。  
+> 状态是 designed, not enabled；没有任何"auto 已经跑通"的说法；并发隔离是分析结论，不是负载测试结论。  
 
 ## 11. DeepSeek 和 MiMo 如何分工？
 
@@ -111,8 +117,9 @@ Fast route 承接清晰、常规、对延迟敏感的工作；capable route 承�
 先把 G1 走完：积累足够的真实流量样本，用分布去评估 sticky 规则 —— challenger 赢的 margin 分布、task class 与 JEV choice 的相关性、confidence 卡在阈值附近的频率、以及每次切换会付出多少 cache 成本。  
 `would_execute` 这个字段就是为此存在的：规则可以在真实 turn 上离线评估，一条都不用真的切。  
 之后是 G2（设置 approval flag，验证 breaker、lease、heartbeat）、G3（并发实证测试，以及负载下演练 kill switch）、G4（在有界窗口 `auto_until` 内开启 auto，且 sticky routing 生效）。  
+在这一版里，状态文件写 `auto` 也不会真的自治：模式先回落成 `shadow`，mode audit log 里记一条 `auto_not_implemented` —— 在 G4 之前，"开关"和"行为"是分开的两件事。  
 
-> 任何一关不满足就停在 shadow；没有时间表承诺，G1 的样本量由真实流量决定。  
+> 任何一关不满足就停在 shadow；没有时间表承诺，G1 的样本量由真实流量决定；auto 是 designed, not enabled。  
 
 ## 13. （附加）如果让你从零再做一次，你会改进什么？
 

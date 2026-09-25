@@ -72,6 +72,20 @@ Notes on rigour:
 | Content-free telemetry | Confirmed — prompt text, headers and memory never appear in the log |
 | Fail-open under a real failure | Confirmed — one genuine routing timeout occurred during real traffic; the reply was delivered normally and the failure was classified in telemetry |
 
+## How the suites are executed
+
+| Run | Checks |
+|---|---|
+| `python3 tests/test_router.py` (default) | 33/33 — pure offline, no network, no credential |
+| `RUN_LIVE_TESTS=1 python3 tests/test_router.py` | 40/40 — adds the live routing group |
+| `python3 tests/test_state.py` | 21/21 — kill-switch resolver, offline |
+
+The live group is **opt-in by flag, not by credential discovery**: a credential merely
+being present on the machine never causes an external call, so the default run is safe
+anywhere. CI (GitHub Actions) runs the two offline suites, the state initialiser in
+`--dry-run` mode and the dependency-free secret scan on every push, with no secrets
+configured.
+
 ## What is deliberately not claimed
 
 - No benchmark, cost-saving or latency-improvement figure: the real-traffic sample is

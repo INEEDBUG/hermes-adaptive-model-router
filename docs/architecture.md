@@ -29,6 +29,23 @@ Anything the hook returns is request content. This plugin always returns `None`,
 which is what makes the shadow guarantee checkable by reading one line of code
 (`plugin/__init__.py`, `_on_pre_api_request`).
 
+### Runtime mode authority and durable installation
+
+The mode is resolved **once per turn from the state file** (`mode.json`); the
+`ROUTER_MODE` variable is only a default inside the library's config helper and does
+not enable collection by itself. A missing, unreadable or corrupt state file resolves
+to `off`. `tools/init_state.py` writes that file explicitly and atomically, refuses to
+write while a `KILL` sentinel exists, and never writes `auto`.
+
+Because a gateway restart runs a fresh process, the plugin's import path must survive
+it: `tools/install_plugin.sh` copies the plugin into `$HERMES_HOME/plugins/`, persists
+`JEV_ROUTER_ROOT` in the Hermes `.env` (append-only, never overwriting an existing
+value), **merges** `jev-shadow-router` into the existing `plugins.enabled` list instead
+of replacing it, and initialises the state file. Every touched file is backed up.
+
+Automatic switching is not implemented in this release: a state file recording `auto`
+is resolved to `shadow` and audited as `auto_not_implemented`.
+
 ## Data flow (shadow)
 
 ```mermaid

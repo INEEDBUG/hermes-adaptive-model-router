@@ -35,8 +35,12 @@ def _has(text: str, words) -> bool:
 
 
 def build(user_message: str, *, previous_failures: int = 0, verification_failed: bool = False,
-          available_routes=None) -> dict:
-    """Return ``(dossier, redaction_metadata)`` for a single turn."""
+          available_routes=None) -> tuple:
+    """Return ``(dossier, redaction_metadata)`` for a single turn.
+
+    The return value is a 2-tuple: the dossier object and the metadata produced by
+    :func:`router.redact.redact` (``hits``, ``kinds``, ``unsafe``).
+    """
     redacted, meta = redact.redact(user_message or '')
     turn = redact.truncate(redacted, MAX_TURN_CHARS)
     low = turn.lower()

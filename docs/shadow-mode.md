@@ -15,6 +15,12 @@ if res['mode'] == 'off':
     return None                    # behave exactly like "not installed"
 ````
 
+The **state file is the runtime authority**: it is resolved once per turn, and a
+missing, unreadable, corrupt or non-object file resolves to `off`. `ROUTER_MODE`
+(via the library's config helper) is only a default; it does not enable collection by
+itself. `tools/init_state.py` writes the file explicitly and atomically, refuses to
+write while a `KILL` sentinel is present, and never writes `auto`.
+
 Resolution order, first match wins:
 
 | # | Condition | Result |
@@ -31,6 +37,12 @@ Resolution order, first match wins:
 Two independent gates protect automatic behaviour: the state file must say `auto`,
 **and** the environment must carry an explicit approval value. A single edit of a
 configuration string cannot enable autonomy.
+
+**Automatic switching is not implemented in this release.** If a state file records
+`auto` (operator intent), the resolver reports that intent faithfully, but the plugin
+resolves it to `shadow` while `router.state.AUTO_IMPLEMENTED` is `False` and appends an
+`auto_not_implemented` entry to the mode audit log. Nothing in telemetry can therefore
+suggest that automatic routing took place.
 
 ## State file
 
@@ -64,7 +76,8 @@ Per decision:
 | `would_execute` | What a future auto mode would have chosen |
 | `mode` | Mode in force for that turn |
 | `task_length`, `tool_use`, `shell`, `coding`, `debugging`, `research`, `long_context`, `destructive_action`, `production_change` | Content-free task features |
-| `redaction_count`, `dossier_token_estimate` | Privacy/size metadata |
+| `redaction_count` | How many redaction hits the turn produced (a count, never content) |
+| `dossier_token_estimate` | Rough **routing-input** size of the dossier — **not** the conversation-context or prompt-cache size |
 
 Never recorded: the user's message, the dossier body, credentials, memory, tool
 output, host details. The allow-list is enforced by a test (`F4`), so a field added

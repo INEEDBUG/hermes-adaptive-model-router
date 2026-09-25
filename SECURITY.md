@@ -19,14 +19,20 @@ hand-written; no real routing decision is reproduced verbatim.
 
 ## What leaves the host, and what does not
 
-The routing call sends a **Routing Dossier**: the current turn after deterministic
-redaction, truncated to a fixed budget, plus boolean task/risk flags. It does **not**
-send conversation history, long-term memory, tool output, file contents, credentials,
-hostnames or infrastructure details.
+The routing call sends a **Routing Dossier**: the sanitised, truncated text of the
+current turn (after deterministic redaction) plus boolean task/risk flags. State it
+plainly — that sanitised text *is* transmitted; it is the input the decision service
+routes on.
 
-Redaction is best-effort pattern matching, not a formal guarantee. If you need a
-harder boundary, run the router with `ROUTER_MODE=off` (or create the `KILL`
-sentinel) so no third-party call is made at all.
+It does **not** send conversation history, long-term memory, tool output, file
+contents, credentials, hostnames or infrastructure details. Those inputs are not merely
+filtered: the dossier builder never receives them.
+
+Redaction is a finite, documented pattern set: it is strong hygiene, **not** a
+confidentiality or DLP guarantee, and content that matches no pattern travels with the
+sanitised text. If you need a harder boundary, disable routing entirely — write
+`mode: off` with `python3 tools/init_state.py --mode off`, or create the `KILL`
+sentinel (see `docs/failover-and-kill-switch.md`) so no third-party call is made at all.
 
 ## Failure behaviour
 

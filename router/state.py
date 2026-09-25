@@ -37,6 +37,16 @@ HEARTBEAT_MAX_AGE_SECONDS = 120.0
 VALID_MODES = ('off', 'shadow', 'auto')
 _APPROVED_VALUES = {'1', 'true', 'yes', 'on'}
 
+# Release policy flag.
+#
+# Automatic switching is NOT implemented in this release. A state file may record
+# ``mode: "auto"`` to express operator intent, and :func:`resolve` reports that
+# intent faithfully — but consumers must not act on it while this flag is False.
+# The shadow plugin downgrades ``auto`` to ``shadow`` and records
+# ``auto_not_implemented`` in the mode audit log, so neither telemetry nor an
+# operator view can suggest that automatic routing happened.
+AUTO_IMPLEMENTED = False
+
 
 def _home() -> pathlib.Path:
     return pathlib.Path(os.environ.get('HERMES_HOME') or '/opt/data')

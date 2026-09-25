@@ -40,6 +40,17 @@ chk('A4 password= redacted', 'hunter2' not in out)
 chk('A5 hit count > 0', meta['hits'] >= 5, f"hits={meta['hits']} kinds={sorted(meta['kinds'])}")
 chk('A6 private key material marked unsafe',
     redact.redact('-----BEGIN RSA PRIVATE KEY-----\nMIIEfake\n')[1]['unsafe'] is True)
+# Precise counting: a substitution callback must not double-count, and the hit
+# total must equal the number of substituted matches.
+_o7, _m7 = redact.redact('password=hunter2 token: abcdefgh')
+chk('A7 key=value secrets counted once each', _m7['hits'] == 2 and _m7['kinds'] == {'kv_secret'},
+    f"hits={_m7['hits']} kinds={sorted(_m7['kinds'])}")
+_o8, _m8 = redact.redact('password=s3cr3t mail a@b.co host 192.0.2.10')
+chk('A8 mixed patterns counted exactly', _m8['hits'] == 3 and _m8['kinds'] == {'kv_secret', 'email', 'ipv4'},
+    f"hits={_m8['hits']} kinds={sorted(_m8['kinds'])}")
+_o9, _m9 = redact.redact('nothing sensitive in this sentence at all')
+chk('A9 clean text yields zero hits', _m9['hits'] == 0 and not _m9['kinds'],
+    f"hits={_m9['hits']}")
 
 print('=== B. routing dossier (current turn only) ===')
 d, m = dossier.build('Please refactor the auth module across three files and debug the failing test.')
@@ -124,16 +135,23 @@ client.urllib.request.urlopen = _orig
 os.environ.pop('TYPESAFE_API_KEY', None)      # fall back to the configured .env
 os.environ.pop('TYPESAFE_BASE_URL', None)
 
-have_key = bool(os.environ.get('TYPESAFE_API_KEY'))
-if not have_key:
-    try:
-        have_key = 'TYPESAFE_API_KEY=' in config.ENV_PATH.read_text(errors='replace')
-    except Exception:
-        have_key = False
+# Live routing is strictly opt-in: a credential merely being present on the machine
+# must never make the default test run call an external service.
+LIVE = os.environ.get('RUN_LIVE_TESTS') == '1'
+have_key = False
+if LIVE:
+    have_key = bool(os.environ.get('TYPESAFE_API_KEY'))
+    if not have_key:
+        try:
+            have_key = 'TYPESAFE_API_KEY=' in config.ENV_PATH.read_text(errors='replace')
+        except Exception:
+            have_key = False
 
 print('=== F. plugin path (live routing call + shadow log) ===')
-if not have_key:
-    print('  [SKIP] no routing credential configured; group F skipped')
+if not LIVE:
+    print('  [SKIP] live routing group disabled by default (set RUN_LIVE_TESTS=1 to enable)')
+elif not have_key:
+    print('  [SKIP] RUN_LIVE_TESTS=1 but no routing credential is configured')
 else:
     import importlib.util
     spec = importlib.util.spec_from_file_location('jev_plugin', ROOT / 'plugin' / '__init__.py')
@@ -166,6 +184,21 @@ else:
         chk('F6 route is a known choice', rec['route'] in {'deepseek_flash', 'mimo_pro'})
         chk('F7 prompt text absent from the log', 'Refactor the auth module' not in json.dumps(lines))
         print('     record:', json.dumps(rec, ensure_ascii=False))
+
+print('=== G. automatic switching is not implemented in this release ===')
+import importlib.util as _ilu  # noqa: E402
+
+_spec_g = _ilu.spec_from_file_location('jev_plugin_g', ROOT / 'plugin' / '__init__.py')
+_plug_g = _ilu.module_from_spec(_spec_g)
+_spec_g.loader.exec_module(_plug_g)
+from router import state as _state  # noqa: E402
+
+chk('G1 AUTO_IMPLEMENTED is False', _state.AUTO_IMPLEMENTED is False)
+chk('G2 plugin downgrades auto -> shadow', _plug_g._effective_mode({'mode': 'auto'}) == 'shadow')
+chk('G3 shadow/off pass through unchanged',
+    _plug_g._effective_mode({'mode': 'shadow'}) == 'shadow'
+    and _plug_g._effective_mode({'mode': 'off'}) == 'off')
+chk('G4 unknown mode resolves to off', _plug_g._effective_mode({'mode': 'turbo'}) == 'off')
 
 print()
 fails = [n for n, ok, _ in R if not ok]

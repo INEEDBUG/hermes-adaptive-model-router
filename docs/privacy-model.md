@@ -40,8 +40,14 @@ a matter of remembering to filter.
 
 ## Deterministic redaction
 
-Redaction runs locally, before the dossier leaves the process. It uses no model and
-no network, so it cannot itself leak anything.
+Redaction runs locally, before the dossier leaves the process. It uses no model and no
+network, so it never transmits data outside the process and cannot become a leak channel
+itself.
+
+**Scope of the guarantee.** Redaction is a finite, documented rule set applied to text —
+it is **not** a confidentiality guarantee and **not** a DLP control. Anything outside
+those patterns travels as part of the sanitised turn text. Treat it as strong hygiene plus
+a structural reduction of what leaves the host, not as certification.
 
 | Kind | Pattern (summary) | Replacement |
 |---|---|---|
@@ -75,17 +81,25 @@ two policies are deliberately kept apart.
 - The repository ships synthetic examples only. No production telemetry, session
   database or log is part of this project.
 
-## What the routing service can still infer
+## What the routing service receives, and what it can still infer
 
-Minimising data does not make inference impossible. A routing service still sees:
+Be precise here, because the honest statement is stronger than an absolute one:
 
-- approximate task shape (length bucket, boolean workload flags, risk flags);
-- request timing and frequency;
-- the decision distribution it produced.
+**It does receive** the sanitised, truncated text of the current turn, plus boolean
+requirement flags (tool use, shell, coding, debugging, research, long context), boolean
+risk flags (destructive action, production change) and the runtime counters. Saying "the
+decision service cannot see your data" would be wrong: that text is the input it routes on.
 
-It cannot see your data, but it can see *when* you work and *what class* of work you
-do. Deployments with stricter requirements should run with the router in `off` mode
-or place the decision service in a trusted boundary of their own.
+**It never receives** the surrounding context: conversation history, long-term memory,
+tool output, file contents, credentials or tokens, hostnames and internal addresses,
+device identifiers, chat identifiers, or the system prompt. Those inputs are not merely
+filtered out — the dossier builder never receives them, so they cannot be transmitted.
+
+**It can still infer** approximate task shape (length bucket, workload and risk flags),
+request timing and frequency, and the distribution of decisions it produced. That is not
+your data, but it is metadata about your work. Deployments with stricter requirements
+should run the router in `off` mode or place the decision service inside a trusted
+boundary of their own.
 
 ## Limitations
 

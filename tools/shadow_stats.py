@@ -105,7 +105,13 @@ def dist(vals: list, edges: list) -> dict:
     return out
 
 
-def context_bucket(v) -> str:
+def dossier_size_bucket(v) -> str:
+    """Bucket the Routing Dossier token estimate.
+
+    This measures the *routing input* size only. It is not the agent's conversation
+    context size and not a prompt-cache size: those are runtime signals a future
+    auto release would have to collect separately.
+    """
     if v < 100:
         return '<100'
     if v < 150:
@@ -141,7 +147,7 @@ def build(recs: list, sources: dict) -> dict:
     for r in ok:
         v = r.get('dossier_token_estimate')
         if isinstance(v, (int, float)):
-            ctx_route[context_bucket(v)][r.get('route')] += 1
+            ctx_route[dossier_size_bucket(v)][r.get('route')] += 1
 
     errors = Counter(str(r.get('error')) for r in real if not r.get('success') and r.get('error'))
     return {
@@ -162,7 +168,7 @@ def build(recs: list, sources: dict) -> dict:
         'privacy_fallback': routes.get('LOCAL_PRIVACY_FALLBACK', 0),
         'category_route': {k: dict(v) for k, v in cat_route.items()},
         'task_length_route': {k: dict(v) for k, v in tl_route.items()},
-        'context_bucket_route': {k: dict(v) for k, v in ctx_route.items()},
+        'dossier_size_bucket_route': {k: dict(v) for k, v in ctx_route.items()},
         'excluded': {k: len(v) for k, v in buckets.items() if k != 'real'},
         'excluded_turn_ids': {k: [r.get('turn_id') for r in v][:12]
                               for k, v in buckets.items() if k != 'real'},
@@ -195,8 +201,10 @@ def render(s: dict) -> str:
         if v:
             L.append(f'  {k}: {v}')
     L.append(f"task_length x route: {s['task_length_route']}")
-    L.append('context-size bucket (dossier token estimate) x route:')
-    for k, v in s['context_bucket_route'].items():
+    L.append('routing-input size proxy — Routing Dossier token-estimate bucket x route')
+    L.append('(this is the sanitised dossier size, NOT the agent conversation context'
+             ' or prompt-cache size)')
+    for k, v in s['dossier_size_bucket_route'].items():
         L.append(f'  {k}: {v}')
     return '\n'.join(L)
 
