@@ -38,6 +38,11 @@ Two independent gates protect automatic behaviour: the state file must say `auto
 **and** the environment must carry an explicit approval value. A single edit of a
 configuration string cannot enable autonomy.
 
+Mode resolution is unchanged by the human-turn provenance boundary (v0.2.0), and the
+boundary is not a mode. Mode answers "may this deployment observe at all"; provenance
+answers "is *this* turn a human turn", and it is evaluated before any dossier is built,
+whatever the mode says. A rejected turn therefore produces no record in any mode.
+
 **Automatic switching is not implemented in this release.** If a state file records
 `auto` (operator intent), the resolver reports that intent faithfully, but the plugin
 resolves it to `shadow` while `router.state.AUTO_IMPLEMENTED` is `False` and appends an
@@ -68,6 +73,7 @@ Per decision:
 | Field | Purpose |
 |---|---|
 | `timestamp`, `turn_id` | Correlate a decision with a turn (no content) |
+| `platform`, `turn_origin` | Provenance labels of the turn, added in v0.2.0 (enumeration values, never content). A record can only be written for a turn whose platform was allow-listed **and** whose `turn_origin` was `user` — the labels record which gates it passed |
 | `jev_model` | Concrete routing model revision behind the alias |
 | `route`, `confidence`, `p_deepseek`, `p_mimo` | Decision and its certainty |
 | `latency_ms`, `input_tokens`, `output_tokens` | Cost and latency envelope |
@@ -83,11 +89,68 @@ Never recorded: the user's message, the dossier body, credentials, memory, tool
 output, host details. The allow-list is enforced by a test (`F4`), so a field added
 to the record fails the suite until the allow-list is updated deliberately.
 
+## Human-turn provenance boundary (v0.2.0)
+
+The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
+
+A shadow record therefore exists only for a turn that passed both gates (`platform` in `JEV_ALLOWED_PLATFORMS`, `turn_origin == "user"`). Everything else is counted, content-free, and never becomes a record or a routing call.
+
+## Rejected turns are counted, not recorded
+
+A turn the provenance boundary rejects (see `docs/privacy-model.md`) produces **no** shadow
+record: no dossier, no decision, no routing call. What it produces instead is an increment
+in a content-free counter file, whose entries carry only `date`, `platform`, `turn_origin`,
+`reason` and `count` — a synthetic example is
+`examples/skipped-turn-counters.example.json`.
+
+Banned in that file: prompt text, message bodies, Routing Dossiers, tool input or output,
+memory, the system prompt, session/turn/message ids and credentials. Two properties enforce
+that structurally: the write path takes no message argument at all, and every label is
+normalised to a bounded token with an unknown reason collapsing to a closed-vocabulary
+category.
+
+Reason categories: `allowlist_empty`, `missing_platform`, `platform_not_allowed`,
+`missing_origin`, `origin_not_user`, `invariant_violation`, `other`.
+
+Two details matter when reading the counters:
+
+- rejections are counted once per **turn**, not once per API call, so a background fork that
+  issues several calls is one rejection and a user turn that is admitted adds none;
+- a burst of `missing_origin` is not a routing outage — it is the fail-closed path, and it
+  usually means the core integration is absent or has drifted (`tools/check_turn_origin_patch.py`,
+  exit 3).
+
+Groups C, E and G of `tests/test_turn_boundary.py` pin the per-turn counting, the
+content-free telemetry and the provenance carried into an accepted record.
+
 ## Reading the telemetry
 
 `tools/shadow_stats.py` produces the aggregate view, including confidence
 percentiles, margin distribution, latency percentiles and per-category/per-context
 route breakdowns. A single record looks like `examples/shadow-record.example.json`.
+
+The rejection counters are a separate file and not part of that view:
+`router.skip_telemetry.totals()` flattens their day buckets into `{turn_origin: count}` for
+reporting.
+
+## Provenance smoke check (shadow mode)
+
+Sanitised summary of the production smoke check — no ids, no timestamps:
+
+| Case | Routing decisions |
+|---|---|
+| Human turn | 1 |
+| Subagent turn | 0 |
+| Internal notification | 0 |
+| Background review | 0 |
+| Missing / unknown origin | 0 |
+| Concurrent user + background isolation | PASS |
+| Content-free rejection telemetry | PASS |
+
+Production runs in shadow mode and automatic switching remains disabled; nothing in that
+check was observed in auto mode. The counts are a smoke check of the boundary, not a
+sample of route quality: they say which turns were admitted, not how well a decision
+performed.
 
 ## Sample hygiene
 

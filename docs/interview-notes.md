@@ -1,7 +1,7 @@
 # JEV Shadow Router 技术面试问答笔记
 
 这是一份口述笔记：每节先给一段可以照着说出口的参考回答，再给必要的事实边界。  
-所有数字只来自离线测试与真实验证记录（39/39 离线检查（live 组 opt-in 后 46/46）、26/26 kill-switch checks、secret-scanner controls 24/24、installer 36/36、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
+所有数字只来自离线测试与真实验证记录（39/39 离线检查（live 组 opt-in 后 46/46）、26/26 kill-switch checks、secret-scanner controls 24/24、installer 36/36、v0.2.0 人类回合来源边界 37/37、6 项 provider 矩阵），不含 benchmark 或成本节省结论。  
 `>` 开头的是边界声明，说明哪一条是读源码分析出来的、哪一条是实测过的 —— 面试时说清这条，比多抛一个数字更有说服力。
 
 > 测试默认完全离线：live 组只有显式设置 `RUN_LIVE_TESTS=1` 时才发起真实调用（本机恰好有凭据不会触发）。offline by default; the live group only runs with `RUN_LIVE_TESTS=1`, so a credential present on the machine never triggers a third-party call.  
@@ -83,7 +83,7 @@ Fail-open，加上分类。每个失败都被归类：`timeout`、`http_401`、`
 Data minimisation：dossier 只包含当前 turn，确定性 redaction 之后截断到 1200 字符，加上 boolean 的 requirement flags（tool use、shell、coding、debugging、research、long context）和 risk flags（destructive action、production change）。  
 结构性保证比"记得过滤"可靠：dossier builder 的唯一内容入参就是当前 user message，它拿不到 memory、history、tool output 或文件内容。这里要把"到底收到了什么"说准：服务确实会收到经过 redaction、截断到 1200 字符的当前轮文本，加上 boolean 的 requirement / risk flags；它收不到的才是 history、memory、tool output、文件内容和凭据。  
 Redaction 是本地、离线、正则的：不用模型、不连网，所以它自己不会成为泄露源，覆盖 PEM private key、前缀 API key、Bearer token、`key=value` secret、email、IPv4/IPv6、`user@host` 和长 opaque token。  
-Telemetry 只记录 redaction 的命中次数，不记录内容；字段走固定 allow-list，加一个可能带内容的字段会直接把测试套件跑红。  
+Telemetry 只记录 redaction 的命中次数，不记录内容；字段走固定 allow-list，加一个可能带内容的字段会直接把测试套件跑红。v0.2.0 起再加一层来源边界：只有 human-origin 回合才会走到这一步，platform 白名单本身不算边界（见第 13 节）。  
 
 > 确定性正则 redaction 不是保密保证，也不是 DLP：匹配不到任何模式的 secret 它认不出来，所以这是很强的卫生习惯，而不是合规或保密的承诺。另外最小化不等于不可推断 —— 服务仍然看得到任务形状和请求时序。  
 
@@ -126,7 +126,27 @@ Fast route 承接清晰、常规、对延迟敏感的工作；capable route 承�
 
 > 任何一关不满足就停在 shadow；没有时间表承诺，G1 的样本量由真实流量决定；auto 是 designed, not enabled。  
 
-## 13. （附加）如果让你从零再做一次，你会改进什么？
+## 13. 人类回合来源边界（v0.2.0）：只有真正的人类回合才能被观测吗？
+
+这一节回答 v0.2.0 让这个项目可以回答的四个问题：为什么 platform 白名单不是隐私边界、为什么来源判定必须是结构性的而不是看文本、fail-closed 对"标签缺失"具体意味着什么、以及在不碰冻结生产系统的前提下这套改动是怎么验证的。
+
+一个 platform 白名单不是隐私边界，只是一个入口开关。钩子在每次 provider 请求前都会触发，而网关自注入的通知、compaction 续跑、background-review fork 和 subagent 回合都会**继承**来源会话的 platform 标签 —— 一次飞书会话的 background review 一样上报 `platform=feishu`。所以"平台在 allowlist 里"根本说明不了这一轮是人类发的；这个混淆是在真实 telemetry 里被诊断出来的，也正是 v0.2.0 要修的东西。
+修复是结构性的，不是文本启发式：在**任何 Routing Dossier 构造之前**过两道门 —— 门 1 `platform IN JEV_ALLOWED_PLATFORMS`，门 2（权威条件）`turn_origin == "user"`；任一不满足就拒绝该回合，发生在 `redact → dossier.build → shadow.submit` 之前。**不用消息文本判断来源**：文本是任何人都能写进请求里的，而真正的混淆来自结构（fork / continuation / 通知），不是措辞 —— 拿文本当判据既不可靠，也会把"猜"混进一个本该是确定性的判定里。
+`turn_origin` 由核心提供，来自一份最小的 Hermes 集成补丁（`patches/hermes-v0.21.5-turn-origin.patch`，针对 Hermes Agent v0.21.5 构建与测试），取值是一个封闭词表：`user`、`internal_notification`、`compaction_continuation`、`background_review`、`subagent`、`oneshot`、`cron`、`curator`、`api_server`、`unknown`。
+"fail-closed" 在这里的含义很具体：来源标签**缺失、为空或 unknown 一律拒绝**，绝不默认成 `user`。最直接的后果是 —— 如果某次 Hermes 升级把这份集成弄丢了，插件收不到 `turn_origin`，于是它拒绝一切回合、路由直接停摆：宁可什么都不观测，也不会在来源未知的情况下把当前轮文本交给第三方决策服务。
+验证完全离线或脱敏，没碰冻结的生产系统：37 项离线矩阵（A–G 组：双门矩阵、fail-closed 路径、按 turn 计数、并发隔离、content-free telemetry、异常检测器、记录里的来源字段）；并发隔离测试让人类回合与 background 回合并行跑；content-free telemetry 审计确认拒绝记录只写 date / platform / turn_origin / reason / count，且写入路径没有 message 参数；脱敏生产 smoke 里人类回合得 1 条路由决策，subagent / internal notification / background review / 缺失或 unknown 来源都是 0，并发 user-background 隔离与 content-free telemetry 均 PASS。上游漂移由 `tools/check_turn_origin_patch.py` 守着：版本目标、补丁标记、插件里的两道门、离线 fail-closed 证明，任一不符即 exit 3，路由器保持 fail-closed/关闭，直到补丁重新应用。
+
+> The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
+
+> Shadow routing logic remains plugin-based, while strict human-turn provenance requires a minimal Hermes v0.21.5 turn_origin integration patch. 这条要主动讲：v0.1.x 的说法是"零核心补丁"，那是当时的范围，而严格的人类回合来源需要这份最小补丁 —— 说清楚比让面试官自己去发现更有说服力。
+
+> 生产仍是 shadow：自动切换未实现且关闭，从未启用过自动路由。这个边界不是在生产系统上验证的 —— 它靠离线矩阵加一次脱敏 smoke 验证，没有对运行中的 gateway 动手。
+
+> 不声明路由准确率、成本节省或任何自动切换收益，也不声明 shadow 观测之外的任何生产影响。
+
+> Built and tested against Hermes Agent v0.21.5. Hermes Agent is a Nous Research project; this repository is an independent plugin project with no affiliation to it.
+
+## 14. （附加）如果让你从零再做一次，你会改进什么？
 
 我会更早把并发测试写出来，而不是先写并发分析：读源码得出"by construction 安全"是有价值的，但真正卡住 auto 的恰好是那个没做的实证测试，测试先行会让 rollout gate 的边界更早明确。  
 我会把样本来源标记放进写入路径，而不是靠 `turn_id` 前缀加 session DB 反查来区分真实流量和测试流量 —— 现在这套分离是可审计的，但统计工具会因此简单很多。  

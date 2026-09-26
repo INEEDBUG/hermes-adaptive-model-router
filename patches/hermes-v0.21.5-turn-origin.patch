@@ -1,0 +1,280 @@
+turn_origin provenance for Hermes Agent v0.21.5 hook payloads
+============================================================
+
+Built and tested against Hermes Agent v0.21.5. Hermes Agent is a Nous Research project;
+this patch is an independent, minimal integration that this repository (a standalone plugin
+project) needs in order to know whether a turn came from a real human. It contains no
+upstream source beyond the few context lines a unified diff requires, and it claims no
+affiliation with or authorship of the upstream project.
+
+Why it exists
+-------------
+The ``pre_api_request`` hook fires for every provider request the agent makes, including
+requests that do not belong to a human turn: gateway self-injected notifications, compaction
+continuations, background-review forks, delegated subagents, CLI one-shot runs, cron jobs and
+curator runs. A hook payload that carries only ``platform`` cannot separate those from a human
+message, because a fork or notification inherits the platform label of the session it came
+from (a background review of a Feishu conversation reports ``platform=feishu``).
+
+What the patch adds
+-------------------
+A structural, per-turn ``turn_origin`` label, decided by the core *before* the request is
+assembled, and exposed in the ``pre_api_request`` payload:
+
+* new module ``agent/turn_origin.py`` — the closed vocabulary and the classifier;
+* ``agent/conversation_loop.py`` — classify once at turn setup;
+* ``agent/turn_api_request.py`` — put ``turn_origin`` into the hook payload;
+* ``gateway/run_turn_runner.py`` — set the structural hint for the turn being dispatched;
+* ``hermes_cli/oneshot.py`` — stamp CLI one-shot runs.
+
+Vocabulary: ``user``, ``internal_notification``, ``compaction_continuation``,
+``background_review``, ``subagent``, ``oneshot``, ``cron``, ``curator``, ``api_server``,
+``unknown``. The decision uses Hermes' own turn metadata only — never message text — and
+**fails closed to ``unknown``**: a payload with no ``turn_origin`` means "not eligible", so a
+Hermes upgrade that drops this integration cannot silently restore unconditional routing
+(the plugin rejects a missing label).
+
+Apply
+-----
+    patch -p1 --dry-run < patches/hermes-v0.21.5-turn-origin.patch      # from the Hermes root
+    patch -p1 < patches/hermes-v0.21.5-turn-origin.patch
+
+Then restart the gateway and verify with::
+
+    python3 tools/check_turn_origin_patch.py --hermes-root /path/to/hermes
+
+Uninstall: reverse the patch (``patch -R -p1``) and delete ``agent/turn_origin.py``; the plugin
+then rejects every turn and routing stays inert.
+
+diff --git a/agent/turn_origin.py b/agent/turn_origin.py
+new file mode 100644
+--- /dev/null
++++ b/agent/turn_origin.py
++"""Turn-origin classification for hook payloads.
++
++JEV-TURN-ORIGIN-PATCH v0.21.5 — added for the v0.2.0 human-turn provenance boundary.
++
++Why
++---
++``pre_api_request`` fires for every provider request the agent makes, including requests that do
++not belong to a real user turn: gateway self-injected notifications, compaction continuations,
++background-review forks, delegated subagents, CLI oneshot runs, cron jobs and curator runs.
++Consumers that must only ever see human turns need a structural, authoritative origin — decided
++by the core before the request is built — instead of guessing from the message text.
++
++Contract
++--------
++* ``ORIGINS`` is the closed set of values; anything else (or a missing value) is ``unknown``.
++* The value is decided from Hermes' own turn metadata only (``agent.platform``, the persisted
++  user-row display kind, Hermes' compaction-carrier classifier, and the upstream
++  ``agent._turn_origin`` fork tag). Message text is never used to decide ``user``.
++* Fail-closed: ``unknown`` is the fallback. ``user`` is only ever reported when the gateway
++  dispatch explicitly identified a real inbound platform message (hint) — never by default.
++* ``assign()`` runs once per turn, before any API request is assembled, so the value is already
++  final when ``pre_api_request`` fires.
++"""
++from __future__ import annotations
++
++import logging
++
++logger = logging.getLogger(__name__)
++
++# JEV-TURN-ORIGIN-PATCH v0.21.5 (marker consumed by tools/check_turn_origin_patch.py)
++ORIGINS = (
++    "user",
++    "internal_notification",
++    "compaction_continuation",
++    "background_review",
++    "subagent",
++    "oneshot",
++    "cron",
++    "curator",
++    "api_server",
++    "unknown",
++)
++
++UNKNOWN = "unknown"
++
++#: Per-turn value read by hook payload builders.
++ATTR = "turn_origin"
++#: Per-turn hint set by the gateway right before it dispatches the turn ("user" / internal kind).
++HINT_ATTR = "_turn_origin_hint"
++#: Upstream fork tag (agent/background_review.py) — authoritative when present.
++UPSTREAM_ATTR = "_turn_origin"
++
++# platform -> origin, for entry points that already identify themselves structurally.
++PLATFORM_ORIGINS = {
++    "subagent": "subagent",
++    "cron": "cron",
++    "curator": "curator",
++    "api_server": "api_server",
++}
++
++
++def normalize(value) -> str:
++    """Return a valid origin string, or ``unknown`` (never guesses ``user``)."""
++    if isinstance(value, str):
++        v = value.strip().lower()
++        if v in ORIGINS:
++            return v
++    return UNKNOWN
++
++
++def _platform(agent) -> str:
++    try:
++        return str(getattr(agent, "platform", "") or "").strip().lower()
++    except Exception:
++        return ""
++
++
++def _is_compaction_carrier(user_message) -> bool:
++    """True when the turn's user message is a compaction handoff (Hermes' own classifier)."""
++    try:
++        from agent.context_compressor import is_compaction_summary_message
++
++        if isinstance(user_message, dict):
++            return bool(is_compaction_summary_message(user_message))
++        if isinstance(user_message, str):
++            return bool(is_compaction_summary_message({"role": "user", "content": user_message}))
++    except Exception:
++        return False
++    return False
++
++
++def classify(agent, *, persist_user_display_kind=None, user_message=None) -> str:
++    """Decide this turn's origin from structural metadata. Never inspects text to say ``user``."""
++    # 1. upstream fork tag / explicit stamp (background review, oneshot, ...)
++    sticky = normalize(getattr(agent, UPSTREAM_ATTR, None))
++    if sticky != UNKNOWN:
++        return sticky
++    # 2. platform already identifies the entry point
++    platform_origin = PLATFORM_ORIGINS.get(_platform(agent))
++    if platform_origin:
++        return platform_origin
++    # 3. compaction continuation (carrier message rather than a fresh human message)
++    if _is_compaction_carrier(user_message):
++        return "compaction_continuation"
++    # 4. gateway hint (structural: the dispatch knew whether the event was self-injected)
++    hint = normalize(getattr(agent, HINT_ATTR, None))
++    if hint != UNKNOWN:
++        return hint
++    # 5. fail-closed
++    return UNKNOWN
++
++
++def assign(agent, *, persist_user_display_kind=None, user_message=None) -> str:
++    """Stamp ``agent.turn_origin`` for this turn. Never raises; always ends in a valid origin."""
++    origin = UNKNOWN
++    try:
++        origin = classify(agent, persist_user_display_kind=persist_user_display_kind,
++                          user_message=user_message)
++    except Exception:
++        logger.debug("turn-origin classification failed; reporting unknown", exc_info=True)
++        origin = UNKNOWN
++    try:
++        setattr(agent, ATTR, origin)
++    except Exception:
++        pass
++    try:
++        # Single-use: a hint must never leak into a later turn of the same agent object.
++        delattr(agent, HINT_ATTR)
++    except Exception:
++        pass
++    return origin
++
++
++def stamp(agent, origin: str) -> str:
++    """Entry-point stamp (fork/oneshot): authoritative for that agent from now on."""
++    value = normalize(origin)
++    try:
++        setattr(agent, UPSTREAM_ATTR, value)
++    except Exception:
++        pass
++    return value
++
++
++def current(agent) -> str:
++    """Read this turn's origin for a hook payload. Fail-closed to ``unknown``."""
++    value = normalize(getattr(agent, ATTR, None))
++    if value != UNKNOWN:
++        return value
++    # A payload may be built before assign() ran (or on an object without it): fall back to the
++    # structural sources, never to "user".
++    try:
++        return classify(agent)
++    except Exception:
++        return UNKNOWN
+
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1484,6 +1484,15 @@
+     except Exception:
+         logger.debug("per-turn env credential refresh failed", exc_info=True)
+ 
++    # JEV-TURN-ORIGIN-PATCH v0.21.5: classify this turn's origin before any request is assembled.
++    try:
++        from agent import turn_origin as _turn_origin
++
++        _turn_origin.assign(agent, persist_user_display_kind=persist_user_display_kind,
++                            user_message=user_message)
++    except Exception:
++        logger.debug("turn-origin assignment skipped", exc_info=True)
++
+     # Per-turn setup: build_turn_context mutates ``agent`` and returns the locals the loop reads.
+     try:
+         _ctx = build_turn_context(
+
+--- a/agent/turn_api_request.py
++++ b/agent/turn_api_request.py
+@@ -59,8 +59,11 @@
+             # ``request_messages``/``conversation_history`` are raw langfuse passthroughs.
+             # Anthropic (``system``) and Responses/Codex (``instructions``) move the system
+             # prompt out of messages; pass it for observability.
++            # JEV-TURN-ORIGIN-PATCH v0.21.5: expose the structural turn origin to observers (fail-closed: unknown).
++            from agent import turn_origin as _turn_origin
+             _invoke_hook(
+                 "pre_api_request",
++                turn_origin=_turn_origin.current(agent),
+                 task_id=effective_task_id,
+                 turn_id=turn_id,
+                 api_request_id=api_request_id,
+
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1707,6 +1707,19 @@
+                 kwargs["persist_user_message"] = persist_user_message_override
+             elif observed_group_context:
+                 kwargs["persist_user_message"] = ctx.message
++            # JEV-TURN-ORIGIN-PATCH v0.21.5: structural origin hint for hook payloads. The gateway knows here whether
++            # this turn came from a real inbound platform message; consumers must never infer
++            # it from message text. A missing hint stays "unknown" and consumers skip.
++            try:
++                from gateway.response_filters import INTERNAL_NOTIFICATION_DISPLAY_KIND
++
++                agent._turn_origin_hint = (
++                    INTERNAL_NOTIFICATION_DISPLAY_KIND
++                    if ctx.persist_user_display_kind == INTERNAL_NOTIFICATION_DISPLAY_KIND
++                    else "user"
++                )
++            except Exception:
++                agent._turn_origin_hint = "unknown"
+             if ctx.persist_user_display_kind:
+                 # Internal self-injected turn: type the persisted user row so UIs render it as a
+                 # timeline notice, not a user bubble (stripped from provider payloads downstream).
+
+--- a/hermes_cli/oneshot.py
++++ b/hermes_cli/oneshot.py
+@@ -593,6 +593,13 @@
+             clarify_callback=_oneshot_clarify_callback,
+         )
+         # Belt-and-braces: no streaming display callbacks may bypass our stdout capture.
++        # JEV-TURN-ORIGIN-PATCH v0.21.5: a CLI oneshot run is never a user turn.
++        try:
++            from agent import turn_origin as _turn_origin
++
++            _turn_origin.stamp(agent, "oneshot")
++        except Exception:
++            pass
+         agent.suppress_status_output = True
+         agent.stream_delta_callback = None
+         agent.tool_gen_callback = None

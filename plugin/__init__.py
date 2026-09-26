@@ -12,6 +12,28 @@ Guarantees
 * the executing model is decided by the gateway's own configuration, never here;
 * with the resolved mode ``off`` the plugin returns immediately, so its behaviour
   is identical to not being installed.
+
+Human-turn provenance boundary (v0.2.0)
+--------------------------------------
+A routing observation is a privacy event: it hands a sanitised, truncated copy of the
+current turn to a third-party decision service. Only a **human-origin** turn may cause one,
+and the two conditions are evaluated structurally, before any dossier work::
+
+    platform     in JEV_ALLOWED_PLATFORMS     (gate 1)
+    turn_origin  == "user"                    (gate 2, authoritative)
+
+``turn_origin`` is supplied by the gateway (see
+``patches/hermes-v0.21.5-turn-origin.patch``); it is never inferred from message text here.
+An internal notification, a background review fork, a compaction continuation, a subagent,
+a cron or a CLI turn is rejected — as is a payload with no ``turn_origin`` at all, which is
+what happens when the integration patch is absent (after a Hermes upgrade, for instance).
+Missing / empty / unknown origin resolves to a skip, never to ``user``.
+
+Gate 1 alone is not a boundary: internal and background turns can inherit the platform
+label of the session that spawned them, which is exactly why gate 2 exists.
+
+Rejected turns are counted content-free (see :mod:`router.skip_telemetry`) and nothing
+about them is transmitted anywhere.
 """
 from __future__ import annotations
 
@@ -31,7 +53,12 @@ _MAX_SEEN = 256
 
 
 def _first_call_of_turn(kwargs: dict) -> bool:
-    """True only for the first non-retry API call of a turn."""
+    """True only for the first non-retry API call of a turn.
+
+    Evaluated before the boundary gates so that an observation and a rejection are each
+    counted once per *turn*, not once per API call: a background fork that issues three
+    calls is one rejection, not three.
+    """
     if kwargs.get('retry_count'):
         return False
     acc = kwargs.get('api_call_count')
@@ -90,9 +117,50 @@ def _resolve_mode() -> str:
         return 'off'
 
 
+def _provenance(kwargs: dict) -> tuple:
+    """Return ``(platform, turn_origin)`` as normalised enumeration labels.
+
+    Absent, non-string or empty values are returned as empty strings so the caller can
+    reject them explicitly; nothing here looks at message content.
+    """
+    platform = str(kwargs.get('platform') or '').strip().lower()
+    raw_origin = kwargs.get('turn_origin')
+    origin = str(raw_origin).strip().lower() if isinstance(raw_origin, str) else ''
+    return platform, origin
+
+
+def _admit(kwargs: dict) -> tuple:
+    """Apply the two gates. Returns ``(admitted, platform, origin)``.
+
+    Fail-closed: every path that is not *both* an allow-listed platform and a ``user``
+    origin returns ``False``. Each rejection is counted content-free; nothing is sent.
+    """
+    from router import config, skip_telemetry
+
+    platform, origin = _provenance(kwargs)
+    allowed = config.allowed_platforms()
+    if not platform:
+        skip_telemetry.bump('', origin, 'missing_platform')
+        return False, platform, origin
+    if not allowed:
+        # No platform was ever authorised for observation: observe nothing.
+        skip_telemetry.bump(platform, origin, 'allowlist_empty')
+        return False, platform, origin
+    if platform not in allowed:
+        skip_telemetry.bump(platform, origin, 'platform_not_allowed')
+        return False, platform, origin
+    if not origin:
+        skip_telemetry.bump(platform, '', 'missing_origin')
+        return False, platform, origin
+    if origin != config._HUMAN_ORIGIN:
+        skip_telemetry.bump(platform, origin, 'origin_not_user')
+        return False, platform, origin
+    return True, platform, origin
+
+
 def _on_pre_api_request(**kwargs):
     try:
-        from router import dossier, shadow
+        from router import config, dossier, shadow, skip_telemetry
 
         mode = _resolve_mode()
         if mode == 'off':
@@ -100,8 +168,22 @@ def _on_pre_api_request(**kwargs):
         if not _first_call_of_turn(kwargs):
             return None
 
+        # --- human-turn provenance boundary: both gates, before any dossier work -------
+        admitted, platform, origin = _admit(kwargs)
+        if not admitted:
+            return None
+        # --- end boundary -------------------------------------------------------------
+
         user_message = kwargs.get('user_message')
         if not isinstance(user_message, str) or not user_message.strip():
+            return None
+
+        # Defense in depth only. ``turn_origin`` already said "human turn", so a configured
+        # internal marker here is an anomaly worth counting — but content never *grants*
+        # eligibility, it can only withhold it.
+        markers = config.internal_markers()
+        if markers and any(marker in user_message for marker in markers):
+            skip_telemetry.bump(platform, origin, 'invariant_violation')
             return None
 
         built = dossier.build(user_message)
@@ -116,7 +198,8 @@ def _on_pre_api_request(**kwargs):
             return None
 
         shadow.submit(d, turn_id=kwargs.get('turn_id'), actual_model=actual_model,
-                      redaction_count=meta.get('hits'), mode=mode)
+                      redaction_count=meta.get('hits'), mode=mode,
+                      platform=platform, turn_origin=origin)
     except Exception:
         pass
     return None
@@ -128,7 +211,18 @@ def register(ctx) -> None:
         import logging
 
         logging.getLogger('jev-shadow-router').info(
-            'jev-shadow-router loaded: pre_api_request hook registered; runtime_mode=%s '
-            '(fail-safe off; no provider/model switching)', _resolve_mode())
+            'jev-shadow-router loaded: pre_api_request hook registered; runtime_mode=%s; '
+            'allowed_platforms=%s (human turns only; fail-closed without turn_origin)',
+            _resolve_mode(), _allowed_platforms_for_log())
     except Exception:
         pass
+
+
+def _allowed_platforms_for_log() -> str:
+    try:
+        from router import config
+
+        platforms = config.allowed_platforms()
+        return ','.join(platforms) if platforms else '(none: routing inert)'
+    except Exception:
+        return '(unresolved)'

@@ -12,10 +12,18 @@ The routing layer is advisory. Every path that could fail is contained:
 | Worker thread | Exceptions are swallowed inside the worker loop |
 | Telemetry write | Wrapped; a disk error cannot affect the turn |
 | State resolution | Any error resolves to `off` |
+| Human-turn provenance gates | Fail **closed**: a turn that is not provably human is skipped and counted content-free; the turn itself is unaffected |
+| Missing / unknown provenance label | Every turn is rejected — routing goes inert, never unconditional |
 
 Result: with the routing service completely unreachable, an agent turn behaves exactly
 as if the plugin were not installed. This has been tested with an unreachable
 endpoint, an invalid credential and a malformed response.
+
+The provenance boundary is the one deliberate exception to fail-open, and it is closed
+*quietly*: a turn is skipped rather than routed, the agent turn is untouched, and the only
+trace is a content-free counter (`skipped-turn-counters.json`). An empty
+`JEV_ALLOWED_PLATFORMS` — the public default — has the same character: nothing is observed
+until an operator names a platform.
 
 ## Error taxonomy
 
@@ -31,6 +39,12 @@ endpoint, an invalid credential and a malformed response.
 | `malformed_unknown_choice` | choice outside the declared criteria | Contract/version mismatch |
 | `malformed_missing_probabilities` | probabilities absent or empty | Contract break |
 | `malformed_confidence` | confidence missing, out of range, or non-numeric | Contract break |
+
+The rejection reasons of the provenance boundary (`allowlist_empty`, `missing_platform`,
+`platform_not_allowed`, `missing_origin`, `origin_not_user`, `invariant_violation`, `other`)
+are a separate, closed vocabulary counted in `skipped-turn-counters.json`. They are not
+client errors, they never reach the taxonomy above, and they are not failures: they are the
+boundary working.
 
 Classification exists so that failure statistics are actionable instead of a single
 opaque error count. Malformed-response cases are separated from transport cases
@@ -78,6 +92,34 @@ state file records it, but this release downgrades it to `shadow` in the plugin
 mode audit log. That keeps the recorded state honest and the effective behaviour
 truthful at the same time.
 
+## Provenance failures are fail-closed, independently of the kill switch
+
+The kill switch and mode resolution are **unchanged** in v0.2.0: the sentinel file, the
+resolution order above and the `auto → shadow` downgrade behave exactly as before, and the
+provenance boundary neither reads nor writes them.
+
+They are, however, two independent stop conditions, and they point in opposite directions:
+
+| | Kill switch / mode resolution | Human-turn provenance boundary |
+|---|---|---|
+| Decides | whether this deployment may observe at all | whether *this* turn is a human turn |
+| Fail-closed trigger | `KILL` sentinel present, state unreadable or corrupt → `off` | `turn_origin` missing, empty, unknown or not `user` → turn skipped |
+| Who can lift it | an operator, deliberately (delete the sentinel, re-initialise the state) | only a correctly patched core reporting a structural `user` origin |
+| Effect on the agent turn | none | none |
+
+A missing or unrecognised provenance label is therefore itself a fail-closed outcome: it
+does **not** need a tripped breaker or a `KILL` sentinel to suppress an observation, and it
+cannot be lifted by touching state, because there is no code path that reads a missing
+origin as `user`. The reverse is not true either — the sentinel is not a substitute for the
+boundary: it stops observation entirely, whereas the boundary keeps human turns observable
+and everything else out.
+
+Drift is detected rather than assumed: `tools/check_turn_origin_patch.py` checks the version
+target, every patch marker and the plugin's two gates, and proves the behaviour offline
+(missing/unknown/non-`user` origin → zero calls to the routing service; allow-listed human
+turn → exactly one). Exit 3 means drift: the router must stay fail-closed/off until the
+patch is re-applied.
+
 ## Breaker design (for the future auto release)
 
 The resolver already understands the shape a breaker needs, and models it as data:
@@ -103,3 +145,5 @@ Intended semantics, to be wired only together with auto mode:
 | Routing service incident | Leave the sentinel in place; agent behaviour is unaffected |
 | Credential rotation | Replace the credential in the environment/`.env`; no code change |
 | Resuming observation | Remove the sentinel and confirm the next decision is recorded |
+| Routing went quiet, no `KILL` sentinel exists | Check `skipped-turn-counters.json`: a `missing_origin` entry is the fail-closed path, not a routing outage — verify the core integration with `tools/check_turn_origin_patch.py` |
+| Core integration absent after a Hermes upgrade | Nothing is needed to stay safe: every turn already rejects. Keep the plugin disabled or the mode at `off` until the patch is re-applied (exit 3 means drift) |

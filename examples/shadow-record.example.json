@@ -1,8 +1,10 @@
 {
-  "_comment": "Synthetic shadow telemetry record. Field set is fixed and enforced by the test suite (allow-list check F4); no prompt text, dossier body, credential, memory or tool output is ever stored. Timestamps, ids and model revision are invented for illustration.",
+  "_comment": "Synthetic shadow telemetry record. Field set is fixed and enforced by the test suite (allow-list check F4); no prompt text, dossier body, credential, memory or tool output is ever stored. Timestamps, ids and model revision are invented for illustration. A record only exists for a turn that passed the provenance boundary: platform is in JEV_ALLOWED_PLATFORMS and turn_origin is 'user' (v0.2.0). Rejected turns are never recorded here — only counted, content-free, in skipped-turn-counters.json.",
 
   "timestamp": "2026-01-01T00:00:00+00:00",
   "turn_id": "example-session:example-turn",
+  "platform": "feishu",
+  "turn_origin": "user",
   "jev_model": "jev-x.y.z",
   "route": "deepseek_flash",
   "confidence": 0.94,

@@ -136,6 +136,11 @@ def _work(item: dict):
     rec = {
         'timestamp': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'turn_id': item.get('turn_id'),
+        # Provenance labels of the turn this decision belongs to (enumeration, not content).
+        # Only turns whose platform is in the allowlist AND whose turn_origin == 'user' ever
+        # reach this function; every other turn is rejected earlier and counted separately.
+        'platform': item.get('platform'),
+        'turn_origin': item.get('turn_origin'),
         'jev_model': decision.get('model') or config.jev_model(),
         'route': decision.get('choice') or ('ERROR:' + str(decision.get('error'))),
         'confidence': decision.get('confidence'),
@@ -179,8 +184,14 @@ def _runner():
             _q.task_done()
 
 
-def submit(dossier: dict, *, turn_id=None, actual_model=None, redaction_count=None, mode='shadow'):
-    """Enqueue a shadow evaluation without blocking the request path."""
+def submit(dossier: dict, *, turn_id=None, actual_model=None, redaction_count=None, mode='shadow',
+           platform=None, turn_origin=None):
+    """Enqueue a shadow evaluation without blocking the request path.
+
+    ``platform`` / ``turn_origin`` are enumeration labels (never message content): they
+    record which gate the turn passed, so a record can be attributed to human traffic
+    without keeping any text.
+    """
     global _worker_started
     with _lock:
         if not _worker_started:
@@ -189,7 +200,8 @@ def submit(dossier: dict, *, turn_id=None, actual_model=None, redaction_count=No
             _worker_started = True
     try:
         _q.put_nowait({'dossier': dossier, 'turn_id': turn_id, 'actual_model': actual_model,
-                       'redaction_count': redaction_count, 'mode': mode})
+                       'redaction_count': redaction_count, 'mode': mode,
+                       'platform': platform, 'turn_origin': turn_origin})
         return True
     except queue.Full:
         return False

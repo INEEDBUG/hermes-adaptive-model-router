@@ -30,6 +30,19 @@ jobs:
       - name: kill-switch resolver tests
         run: python3 tests/test_state.py
 
+      - name: human-turn provenance boundary (dual gate, concurrency, telemetry)
+        run: python3 tests/test_turn_boundary.py
+
+      # The checker must not be able to claim "healthy" when it cannot see a Hermes tree: a
+      # silent pass there would be worse than no checker at all.
+      - name: drift checker refuses to report healthy without a Hermes checkout
+        run: |
+          set +e
+          python3 tools/check_turn_origin_patch.py --hermes-root /nonexistent >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" -ne 3 ]; then echo "expected exit 3, got $code"; exit 1; fi
+
       - name: secret-scanner control tests (positive / negative / adversarial)
         run: python3 tests/test_secret_scan.py
 

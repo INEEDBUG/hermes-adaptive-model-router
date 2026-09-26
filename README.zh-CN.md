@@ -7,7 +7,12 @@
 fail-open 行为、会话安全、运行时 kill switch 与生产级可观测性。
 
 > **状态：shadow 优先（shadow-first）。** 路由决策会被收集并记录，但实际执行某一轮
-> 的模型仍由网关自身的配置决定。自动切换 provider 是**已设计、未启用**的能力。
+> 的模型仍由网关自身的配置决定。自动切换 provider 是**已设计、未启用**的能力；
+> 观测范围也**仅限真人回合**。
+>
+> 路由器只观察真实人类回合：内部通知、subagent、后台任务与上下文续跑回合，全部在构建 Routing Dossier 之前被拒绝。
+>
+> The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
 
 基于 / 测试于 **Hermes Agent v0.21.5**（Nous Research）。本仓库是一个独立的
 plugin/integration —— 与 Nous Research 无隶属关系，也不包含 Hermes 源码树的任何部分。
@@ -74,7 +79,13 @@ flowchart TD
 5. **会话隔离（session isolation）。** 未来任何切换都限定在单个 session 与单个轮次内。
 6. **先可观测，后自动化。** 先 shadow，再统计，最后才谈自主。
 7. **可回滚的变更。** 一个 sentinel 文件即可关闭一切，无需重启。
-8. **最小化上游改动。** 一个 plugin hook；零 Hermes 核心补丁。
+8. **只观察真人回合。** 一次路由观测会把当前轮次脱敏后的文本发给第三方服务，因此只有真人
+   发出的回合才允许触发。资格判定是结构性的——`platform` 在白名单内 **且**
+   `turn_origin == "user"`——且发生在任何 dossier 构建之前；缺失或未知的 origin 直接拒绝，
+   绝不默认放行。
+9. **最小化上游改动。** Shadow 路由逻辑仍然是插件式的；但严格的真人回合来源判定需要一份最小的
+   Hermes v0.21.5 `turn_origin` 集成补丁。（Shadow routing logic remains plugin-based, while
+   strict human-turn provenance requires a minimal Hermes v0.21.5 `turn_origin` integration patch.）
 
 ## 当前状态
 
@@ -84,6 +95,8 @@ flowchart TD
 | DeepSeek V4.1 Flash 集成 | **已验证**（文本、推理、工具、多步循环、编码、错误路径） |
 | MiMo V2.6 Pro 集成 | **已验证**（同一套矩阵） |
 | 隐私脱敏 + 隐私 fallback | **已验证** |
+| 真人回合来源边界 | **已验证**——离线双门矩阵、并发隔离、脱敏后的生产 smoke（真人 → 1 次观测；subagent / 内部通知 / 后台 review / 缺失 origin → 0） |
+| content-free 拒绝计数 | **已验证**——仅记录 `date`、`platform`、`turn_origin`、`reason`、`count` |
 | 运行时 kill switch | **已验证**（26/26 parser 测试，fail-safe = off；无 override 标志） |
 | 真实/测试遥测分离 | **已验证** |
 | 路由可用性 | **配置，绝不假定** —— `JEV_AVAILABLE_ROUTES`；公开默认值为空 |
@@ -119,9 +132,11 @@ flowchart TD
 ## 仓库结构
 
 ```
-router/     the routing library (config, redact, dossier, client, shadow, state)
-plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
-tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · kill-switch 26 ·
+router/     the routing library (config, redact, dossier, client, shadow, state,
+            skip_telemetry: content-free 拒绝计数)
+plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook + 真人回合双门判定)
+tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · 真人回合边界 37
+            (双门矩阵、fail-closed、按回合计数、并发隔离、遥测审计) · kill-switch 26 ·
             scanner controls 24 (positive, negative, adversarial) · installer 36
             (stand-in hermes CLI; target vs decoy home; existing state preserved)
 tools/      shadow_stats.py (real/test separation) · init_state.py (state file; no
@@ -142,6 +157,8 @@ cd hermes-adaptive-model-router
 # 1. run the suites — offline by default: no credential, no network, no side effects
 python3 tests/test_router.py
 python3 tests/test_state.py
+python3 tests/test_turn_boundary.py     # 真人回合来源双门
+
 
 # 2. install persistently (idempotent: merges plugins.enabled, never replaces the list,
 #    never resets an existing runtime state)
@@ -194,6 +211,8 @@ python3 tools/init_state.py --mode off  # stop collecting, keep the installation
 | `JEV_MIN_MARGIN` | `0.15` | top-2 概率的最小间隔 |
 | `JEV_TIMEOUT_SECONDS` | `3` | 路由调用的硬性上限 |
 | `JEV_AVAILABLE_ROUTES` | empty | 本部署已验证过的路由；为空表示没有任何路由，因此不会有记录声称某个未经验证的 provider 是可执行的 |
+| `JEV_ALLOWED_PLATFORMS` | empty | 允许观测其**真人**回合的平台（如 `feishu`）；为空表示没有任何平台，路由保持静止，直到运维显式填写 |
+| `JEV_INTERNAL_MARKERS` | empty | 可选的纵深防御异常检测标记（`'||'` 分隔）。它只能否决资格，永远不能授予资格，也永远不是边界本身 |
 | `TYPESAFE_API_KEY` | — | 路由服务的凭据（永不写入日志） |
 | `JEV_STATE_DIR` | `$HERMES_HOME/jev_router/state` | kill sentinel + 状态文件 |
 | `JEV_LOG_DIR` | `$HERMES_HOME/logs/router` | shadow 遥测 |
@@ -212,6 +231,12 @@ session 与故障注入运行都会被归入 excluded 桶并被显式列出，�
 统计。
 
 ## 验证结果
+
+真人回合来源边界：`python3 tests/test_turn_boundary.py` → **37/37 通过**（双门矩阵、fail-closed、
+按回合计数、并发隔离、content-free 遥测审计、异常检测、记录携带来源标签）。
+集成漂移检查：`python3 tools/check_turn_origin_patch.py --hermes-root <hermes>` → 退出码 0 表示完好，
+退出码 3 表示漂移，此时路由器必须保持 fail-closed/off。
+
 
 ```
 router suite, offline default .... 39/39 checks pass

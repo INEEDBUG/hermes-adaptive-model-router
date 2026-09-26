@@ -34,6 +34,33 @@ sanitised text. If you need a harder boundary, disable routing entirely — writ
 `mode: off` with `python3 tools/init_state.py --mode off`, or create the `KILL`
 sentinel (see `docs/failover-and-kill-switch.md`) so no third-party call is made at all.
 
+## Human-turn provenance boundary (v0.2.0)
+
+The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
+
+Two structural conditions are evaluated before a Routing Dossier is built: the turn's
+`platform` must be in `JEV_ALLOWED_PLATFORMS`, and its `turn_origin` must be `user`. The
+second is authoritative, because internal notifications, background-review forks, compaction
+continuations and subagent turns can inherit the platform label of the session they came from
+— a platform allowlist on its own does not describe *who* sent the turn. A payload with a
+missing, empty or unrecognised origin is rejected; it is never treated as `user`.
+
+Turns that are rejected are counted locally in a content-free counter file (`date`,
+`platform`, `turn_origin`, `reason`, `count`); the write path has no message parameter, so no
+turn content can reach it. If the provenance label disappears — for instance after a Hermes
+upgrade replaces the patched files — the router stops observing rather than observing
+everything. `tools/check_turn_origin_patch.py` verifies the integration and exits 3 on drift.
+
+### Note on v0.1.x
+
+v0.1.x had no structural provenance boundary. It could therefore send auxiliary, subagent,
+CLI one-shot, cron and background-review turns to the shadow routing service — an overly
+inclusive observation surface, not a credential disclosure: no credential, memory, tool
+output or conversation history was ever part of a dossier, and routing remained advisory with
+automatic switching disabled. v0.2.0 adds the `turn_origin` label and rejects non-human turns
+before the dossier is constructed. v0.1.x users should upgrade; the earlier releases are left
+in place unchanged and are not rewritten.
+
 ## Failure behaviour
 
 Routing is fail-open by design: timeouts, HTTP errors, malformed responses and an

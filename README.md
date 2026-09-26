@@ -5,9 +5,11 @@ TypeSafe JEV routing service to choose between a fast/cost-efficient model and a
 high-capability model — while keeping fail-open behaviour, session safety, a
 runtime kill switch and production observability.
 
-> **Status: shadow-first.** Routing decisions are collected and logged, but the
-> model that actually executes a turn is still chosen by the gateway's own
-> configuration. Automatic provider switching is **designed, not enabled**.
+> **Status: shadow-first, human turns only.** Routing decisions are collected and logged for
+> **human-origin turns**, but the model that actually executes a turn is still chosen by the
+> gateway's own configuration. Automatic provider switching is **designed, not enabled**.
+>
+> The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
 
 Built for / tested with **Hermes Agent v0.21.5** (Nous Research). This repository is
 an independent plugin/integration — it is not affiliated with Nous Research and
@@ -80,7 +82,11 @@ explicit approval flag that the code checks itself.
 5. **Session isolation.** Any future switch is scoped to one session and one turn.
 6. **Observable before automatic.** Shadow mode first, statistics second, autonomy last.
 7. **Reversible changes.** A sentinel file turns everything off without a restart.
-8. **Minimal upstream modification.** One plugin hook; zero Hermes core patches.
+8. **Human turns only.** A routing observation sends a sanitised copy of a turn to a
+   third-party service, so only a turn that a real person sent may cause one. Eligibility is
+   decided structurally — `platform` in the allowlist **and** `turn_origin == "user"` — before
+   any dossier work, and a missing/unknown origin is rejected rather than assumed.
+9. **Minimal upstream modification.** Shadow routing logic remains plugin-based, while strict human-turn provenance requires a minimal Hermes v0.21.5 `turn_origin` integration patch.
 
 ## Current status
 
@@ -90,6 +96,8 @@ explicit approval flag that the code checks itself.
 | DeepSeek V4.1 Flash integration | **Validated** (text, reasoning, tools, multi-step loop, coding, error paths) |
 | MiMo V2.6 Pro integration | **Validated** (same matrix) |
 | Privacy redaction + privacy fallback | **Validated** |
+| Human-turn provenance boundary | **Validated** — offline gate matrix, concurrency isolation, sanitized production smoke (human → 1 observation; subagent / internal notification / background review / missing origin → 0) |
+| Content-free rejection telemetry | **Validated** — `date`, `platform`, `turn_origin`, `reason`, `count` only |
 | Runtime kill switch | **Validated** (26/26 parser tests, fail-safe = off; no override flag) |
 | Real/test telemetry separation | **Validated** |
 | Route availability | **Configured, never assumed** — `JEV_AVAILABLE_ROUTES`; the public default is empty |
@@ -103,42 +111,53 @@ numbers.
 
 ## How it works
 
-1. **Hook.** The plugin registers a single observer hook (`pre_api_request`) that the
+1. **Provenance.** Before any routing work, the hook checks the two gates described above.
+   Nothing else in this list runs for a turn that is not an allow-listed human turn, and the
+   rejection is counted locally without recording any content.
+2. **Hook.** The plugin registers a single observer hook (`pre_api_request`) that the
    Hermes core already calls before each LLM request — and already wraps in
    fail-open error handling. The hook always returns `None`, so no context is
    injected and no request content is modified.
-2. **First call of a turn.** Routing happens once per turn: retries and subsequent
+3. **First call of a turn.** Routing happens once per turn: retries and subsequent
    tool-loop iterations are explicitly skipped (`api_call_count`/`retry_count`).
-3. **Dossier.** A minimal JSON object is built from the current user message:
+4. **Dossier.** A minimal JSON object is built from the current user message:
    redacted and truncated text, boolean requirement flags (tool use, shell, coding,
    debugging, research, long context), risk flags (destructive action, production
    change) and the set of available routes.
-4. **Redaction.** Deterministic, offline, regex-based: private key material, prefixed
+5. **Redaction.** Deterministic, offline, regex-based: private key material, prefixed
    API keys, bearer tokens, `key=value` secrets, emails, IPv4/IPv6 addresses,
    `user@host` targets and long opaque tokens. If private key material is detected,
    the turn is **not** sent anywhere and a local privacy fallback is recorded.
-5. **Decision.** `POST /v1/systemone` with a `choice` question and two criteria;
+6. **Decision.** `POST /v1/systemone` with a `choice` question and two criteria;
    the response carries a choice, a confidence and probabilities. Every failure is
    classified as `timeout`, `http_<code>`, `urlerror_*` or `malformed_*`.
-6. **Telemetry.** A bounded queue plus a daemon worker keep the routing call off the
+7. **Telemetry.** A bounded queue plus a daemon worker keep the routing call off the
    request path; a full queue drops the sample instead of delaying the turn. Records
    contain outcome data and task features only.
-7. **Mode.** Every turn re-resolves the runtime mode from a local state file
+8. **Mode.** Every turn re-resolves the runtime mode from a local state file
    (kill sentinel → state file → breaker → approval/lease/heartbeat). Fail-safe is
    `off`.
 
 ## Repository layout
 
 ```
-router/     the routing library (config, redact, dossier, client, shadow, state)
-plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook)
-tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · kill-switch 26 ·
-            scanner controls 24 (positive, negative, adversarial) · installer 36
-            (stand-in hermes CLI; target vs decoy home; existing state preserved)
+router/     the routing library (config, redact, dossier, client, shadow, state,
+            skip_telemetry: the content-free rejection counters)
+plugin/     the Hermes Agent plugin (plugin.yaml + pre_api_request hook + the
+            human-turn provenance gates)
+tests/      router 39 checks offline (46 with RUN_LIVE_TESTS=1) · human-turn boundary 37
+            (dual gate matrix, fail-closed paths, per-turn counting, concurrency
+            isolation, content-free telemetry, anomaly detector, provenance in the
+            record) · kill-switch 26 · scanner controls 24 (positive, negative,
+            adversarial) · installer 36 (stand-in hermes CLI; target vs decoy home;
+            existing state preserved)
 tools/      shadow_stats.py (real/test separation) · init_state.py (state file; no
             override for the kill sentinel) · install_plugin.sh (persistent install,
             backs up before writing) · secret_scan.py (tree + history; fails when a
-            scan is incomplete)
+            scan is incomplete) · check_turn_origin_patch.py (integration/drift check;
+            exit 3 means keep the router fail-closed)
+patches/    hermes-v0.21.5-turn-origin.patch — the minimal upstream integration that
+            supplies turn_origin (built and tested against Hermes Agent v0.21.5)
 docs/       architecture, shadow mode, privacy model, failover, validation, auto design
 examples/   fully synthetic configuration and telemetry samples
 .github/    CI: offline suites + state-init dry run + secret scan (no secrets configured)
@@ -153,12 +172,26 @@ cd hermes-adaptive-model-router
 # 1. run the suites — offline by default: no credential, no network, no side effects
 python3 tests/test_router.py
 python3 tests/test_state.py
+python3 tests/test_turn_boundary.py     # the human-turn provenance gates
 
 # 2. install persistently (idempotent: merges plugins.enabled, never replaces the list,
 #    never resets an existing runtime state)
 ./tools/install_plugin.sh --hermes-home "$HERMES_HOME" --dry-run   # inspect first
 ./tools/install_plugin.sh --hermes-home "$HERMES_HOME"
 #    then restart the gateway so the plugin is loaded and the environment is re-read
+```
+
+Two more steps are required before anything can be collected at all:
+
+```bash
+# 3. name the platforms whose human turns may be observed. Empty (the default) means
+#    NO platform is allowed: the router stays inert rather than observing everything.
+echo 'JEV_ALLOWED_PLATFORMS=feishu' >> "$HERMES_HOME/.env"
+
+# 4. apply the provenance integration and verify it
+cd /path/to/hermes-agent && patch -p1 < /path/to/patches/hermes-v0.21.5-turn-origin.patch
+python3 tools/check_turn_origin_patch.py --hermes-root /path/to/hermes-agent
+#    exit 0 = intact · exit 3 = drift: keep the router fail-closed/off and re-apply
 ```
 
 The installer copies the plugin into `$HERMES_HOME/plugins/`, **persists**
@@ -210,6 +243,8 @@ Configuration is environment-first, then `.env`, then built-in defaults
 | `JEV_MIN_MARGIN` | `0.15` | minimal top-2 probability margin |
 | `JEV_TIMEOUT_SECONDS` | `3` | hard cap for the routing call |
 | `JEV_AVAILABLE_ROUTES` | empty | routes this deployment has validated; empty means none, so no record claims an unvalidated provider is executable |
+| `JEV_ALLOWED_PLATFORMS` | empty | platforms whose **human** turns may be observed (e.g. `feishu`); empty means none, so routing stays inert until an operator names them |
+| `JEV_INTERNAL_MARKERS` | empty | optional defense-in-depth anomaly detector (`'||'` separated). It can only withhold eligibility, never grant it, and is never the boundary |
 | `TYPESAFE_API_KEY` | — | credential for the routing service (never logged) |
 | `JEV_STATE_DIR` | `$HERMES_HOME/jev_router/state` | kill sentinel + state file |
 | `JEV_LOG_DIR` | `$HERMES_HOME/logs/router` | shadow telemetry |
@@ -232,6 +267,8 @@ they can never inflate production statistics.
 
 ```
 router suite, offline default .... 39/39 checks pass
+human-turn boundary .............. 37/37 checks pass (dual gates, fail-closed, per-turn
+                                   counting, concurrency isolation, telemetry audit)
 router suite, RUN_LIVE_TESTS=1 ... 46/46 checks pass (adds the live routing group)
 kill-switch resolver ............. 26/26 checks pass
 secret-scanner controls .......... 24/24 checks pass (positive, negative, adversarial)
@@ -253,9 +290,16 @@ unscanned (over the size cap) exits 3 instead of reporting clean. See
 ## Privacy and security
 
 See [`SECURITY.md`](SECURITY.md) and [`docs/privacy-model.md`](docs/privacy-model.md).
-Summary: the decision service receives a redacted dossier, never raw private content;
-telemetry is content-free; credentials are never logged; the kill switch makes a
-third-party call impossible without a restart.
+Summary: The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction. The decision service receives a redacted dossier, never raw
+private content; telemetry is content-free; credentials are never logged; the kill switch
+makes a third-party call impossible without a restart.
+
+Because a background review fork or an internal notification inherits the platform label of
+the session it came from, `JEV_ALLOWED_PLATFORMS` alone is **not** a privacy boundary — the
+authoritative condition is `turn_origin == "user"`. One consequence is deliberate: if the
+provenance label is missing (integration patch absent after a Hermes upgrade, for example),
+**every** turn is rejected and routing goes quiet instead of reverting to unconditional
+observation. `tools/check_turn_origin_patch.py` detects exactly that case.
 
 ## Kill switch
 
@@ -270,6 +314,9 @@ approval + lease + heartbeat. Anything unreadable, corrupt or missing resolves t
 ## Limitations
 
 - Redaction is pattern-based, not a formal data-loss-prevention guarantee.
+- Provenance depends on a minimal upstream integration patch (pinned to Hermes v0.21.5 in
+  this release). When it is absent or drifts, the router rejects every turn — inert, not
+  unguarded — and `tools/check_turn_origin_patch.py` reports it (exit 3).
 - The provider-side prompt cache is invalidated by provider switching; per-turn
   switching is therefore treated as a cost, not a feature (see the auto design doc).
 - Auto mode has **no** completed concurrency test yet; the isolation requirements it

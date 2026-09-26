@@ -4,6 +4,36 @@ This document specifies how automatic switching *would* work. Nothing here is
 implemented in this release, and enabling it requires an explicit approval flag that
 the code itself checks.
 
+## Eligibility precondition: human-turn provenance
+
+Any future automatic behaviour inherits the eligibility gates the shadow observer already
+applies, evaluated before a Routing Dossier is built:
+
+| Gate | Condition | Authority |
+|---|---|---|
+| 1 | `platform` in `JEV_ALLOWED_PLATFORMS` | operator policy: which platforms may be observed |
+| 2 | `turn_origin == "user"` | authoritative — this is the privacy boundary |
+
+The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
+
+Gate 1 alone is not a boundary: an auxiliary call, a subagent run or a background job can
+inherit the platform label of the session that spawned it (a fork inherits `platform` from
+the session that created it). Such a turn can therefore **never** be routed automatically,
+and gate 2 is not a heuristic the auto release may relax — it is a precondition for a
+decision being taken at all. `turn_origin` is a structural label supplied by the gateway
+(`patches/hermes-v0.21.5-turn-origin.patch`); it is never inferred from message text, and
+the label is evaluated before routing, not interpreted.
+
+A turn whose provenance can no longer be established stays **fail-closed**: a missing,
+empty or unrecognised `turn_origin` is rejected, never defaulted to `user`. The concrete
+consequence of a bad integration is therefore *no routing*, not routing everything — if the
+label disappears, the safe states are `off` and "rejected", and a missing label must never
+be "fixed" by assuming a human.
+
+Shadow routing logic remains plugin-based, while strict human-turn provenance requires a minimal Hermes v0.21.5 turn_origin integration patch.
+
+Built and tested against Hermes Agent v0.21.5. Hermes Agent is a Nous Research project; this repository is an independent plugin project with no affiliation to it.
+
 ## Insertion point
 
 The shadow plugin uses an observer hook that cannot change a request. Automatic
@@ -35,7 +65,7 @@ Alternatives considered:
 |---|---|
 | Observer hook (`pre_api_request`) | Cannot change the model — correct for shadow, insufficient for auto |
 | Request-level middleware (mutate the outgoing call) | Same provider only; cannot switch provider identity |
-| Execution-level middleware (wrap the provider call) | Would require re-implementing streaming, tool-call assembly, retry/rotation, error shapes and accounting — rejected as a correctness risk for a "no core change" argument |
+| Execution-level middleware (wrap the provider call) | Would require re-implementing streaming, tool-call assembly, retry/rotation, error shapes and accounting — rejected as a correctness risk; this project accepts exactly one narrow, checked core seam (turn provenance) instead of a re-implemented provider stack |
 | Turn-scoped session override (chosen) | One narrow core seam; all existing provider machinery is preserved |
 
 ## Concurrency requirements
@@ -52,7 +82,10 @@ assumed:
    and interruption.
 4. A per-session switch generation token prevents a stale restore from undoing a
    newer turn's switch.
-5. No switching from auxiliary calls, sub-agents or background jobs.
+5. No switching from auxiliary calls, sub-agents or background jobs — enforced
+   structurally by the eligibility precondition above (gate 2), not by convention: those
+   turns are rejected before a dossier exists, so there is nothing for an auto switch to
+   act on.
 6. A breaker disables the router after N consecutive failures.
 
 Item 3 is the residual risk in the current analysis and is exactly why the override is
@@ -116,19 +149,32 @@ The same telemetry that shadow mode produces is what a decision rule must be
 evaluated on: how often the challenger wins by a large margin, how correlated the
 task class is with the JEV choice, how often confidence sits near the threshold, and
 how expensive the switches would have been. `would_execute` already records what auto
-mode *would* have done, so the rule can be evaluated offline against real turns
-before any of them is switched. It is deliberately restricted to the routes the
-deployment configured in `JEV_AVAILABLE_ROUTES` (empty by default): assuming a provider
-exists is exactly how an unvalidated route reaches production.
+mode *would* have done, so the rule can be evaluated offline against real turns before any
+of them is switched. The evaluation sample is **human-origin turns only** — the eligibility
+precondition above — so the rule is tuned on the same traffic class the boundary admits, and
+auxiliary or background turns neither inflate it nor mask it. It is deliberately restricted
+to the routes the deployment configured in `JEV_AVAILABLE_ROUTES` (empty by default):
+assuming a provider exists is exactly how an unvalidated route reaches production.
 
 ## Rollout gates
 
 | Gate | Condition |
 |---|---|
 | G0 (now) | Shadow only; decisions recorded, execution unchanged |
-| G1 | Real-traffic sample large enough to evaluate the rule; distributions published |
+| G0b (every Hermes upgrade) | `python3 tools/check_turn_origin_patch.py --hermes-root <checkout>` exits `0` |
+| G1 | Real-traffic sample of **human-origin** turns large enough to evaluate the rule; distributions published |
 | G2 | Explicit approval flag set; breaker, lease and heartbeat verified |
 | G3 | Empirical concurrency test passes; kill switch exercised under load |
 | G4 | Auto enabled for a bounded window (`auto_until`) with a fresh heartbeat, and sticky routing active |
 
 Failure to satisfy any gate keeps the router in shadow mode.
+
+**The drift check is part of the upgrade procedure, not an optional extra.** The
+provenance label this design depends on comes from a Hermes integration patch, so the
+procedure is: upgrade, re-apply `patches/hermes-v0.21.5-turn-origin.patch`, restart the
+gateway, then run `tools/check_turn_origin_patch.py` (version target, patch markers, plugin
+gates, offline fail-closed proof). Exit `3` means drift — a stale patch, a patched core file
+replaced upstream, or a plugin that no longer fails closed — and the router must stay
+fail-closed/off until the patch is re-applied and the check exits `0`. Because rejection is
+the failure mode, an unpatched gateway routes nothing rather than routing everything; it must
+never be repaired by defaulting a missing origin to `user`.

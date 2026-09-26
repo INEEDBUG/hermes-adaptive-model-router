@@ -74,6 +74,33 @@ Notes on rigour:
 | Content-free telemetry | Confirmed — prompt text, headers and memory never appear in the log |
 | Fail-open under a real failure | Confirmed — one genuine routing timeout occurred during real traffic; the reply was delivered normally and the failure was classified in telemetry |
 
+## Human-origin scope of a validation run
+
+The router only observes human-origin turns. Internal, subagent, background and continuation turns are rejected before Routing Dossier construction.
+
+Two structural conditions are evaluated before any dossier is built, and both must hold:
+the turn's `platform` must be in `JEV_ALLOWED_PLATFORMS` (gate 1), and its `turn_origin`
+must be `user` (gate 2, which is authoritative). Gate 2 is what makes gate 1 meaningful:
+an internal notification, a background-review fork, a compaction continuation or a
+subagent turn can inherit the platform label of the session that spawned it, so a platform
+allowlist on its own does not describe *who* sent the turn. `turn_origin` is a structural
+label supplied by the gateway (see `patches/hermes-v0.21.5-turn-origin.patch`); it is never
+inferred from message text here, and a missing, empty or unrecognised label is rejected
+rather than defaulted to `user`.
+
+**A validation run and the shadow observation period therefore count the same traffic
+class.** Auxiliary, subagent, background and continuation turns are excluded *before* a
+dossier exists, so a route validated against this repository's methodology is validated
+against the traffic the router will actually observe, and no result here is diluted by
+machine-generated turns. The rejection itself is counted locally and content-free (`date`,
+`platform`, `turn_origin`, `reason`, `count` only); the counting write path has no message
+parameter, so no turn content can reach it.
+
+Until the human-origin sample is large enough to evaluate, **no routing-quality claim is
+supported** — not accuracy, not cost, not latency, and not a switching benefit. Automatic
+switching is not implemented in this release, production mode remains `shadow`, and nothing
+has been observed in auto mode.
+
 ## How the suites are executed
 
 | Run | Checks |
@@ -83,18 +110,25 @@ Notes on rigour:
 | `python3 tests/test_state.py` | 26/26 — kill-switch resolver + initialiser boundary, offline |
 | `python3 tests/test_secret_scan.py` | 24/24 — scanner controls: positive, negative, adversarial |
 | `bash tests/test_installer.sh` | 36/36 — stand-in `hermes` CLI, target vs default home, existing state preserved |
+| `python3 tests/test_turn_boundary.py` | 37/37 — human-turn provenance boundary (dual gate, fail-closed paths, per-turn counting, concurrency isolation, content-free telemetry), offline, no network, no credential |
 
 The live group is **opt-in by flag, not by credential discovery**: a credential merely
 being present on the machine never causes an external call, so the default run is safe
-anywhere. CI (GitHub Actions) runs all four suites, the state initialiser in
-`--dry-run` mode and the dependency-free secret scan on every push, with no secrets
-configured. The scan is built to fail: findings exit 1, and objects left unscanned
-(over the size cap) exit 3 rather than reporting clean.
+anywhere. CI (GitHub Actions) runs every offline run in the table above (the live group
+stays opt-in by flag), the state initialiser in `--dry-run` mode, the dependency-free
+secret scan and `tools/check_turn_origin_patch.py` — all offline and network-free, with no
+secrets configured. The drift check is invoked so that it must *fail* when it cannot see a
+Hermes checkout (exit `3`, never a silent pass), which is also the state in which the
+router stays fail-closed. The scan is built to fail in the same spirit: findings exit 1,
+and objects left unscanned (over the size cap) exit 3 rather than reporting clean.
 
 ## What is deliberately not claimed
 
 - No benchmark, cost-saving or latency-improvement figure: the real-traffic sample is
   small by design and is published as distributions rather than headline numbers.
+- No routing-quality conclusion of any kind, because the human-origin sample is still
+  accumulating and is not yet large enough to support one.
 - No claim that automatic switching is enabled, tested or safe under production
-  concurrency.
+  concurrency — it is not implemented, nothing was observed in auto mode, and validity of
+  the shadow decisions says nothing about the safety of acting on them.
 - No claim about a provider outage path that was not actually exercised.
