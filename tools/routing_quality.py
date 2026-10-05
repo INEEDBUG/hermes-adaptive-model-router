@@ -419,6 +419,8 @@ def outcome_correlation(path: pathlib.Path, cohort_out: dict, generation: str) -
         return {"status": "OUTCOME_AGGREGATE_UNREADABLE", "error": str(exc)}
     coverage = (agg.get("HISTORICAL_OUTCOME_JOIN_COVERAGE") or {}).get(generation) or {}
     structure = agg.get("STRUGGLE_STRUCTURE") or {}
+    prospective = agg.get("PROSPECTIVE_OUTCOME_TELEMETRY") or {}
+    prospective_gen = (prospective.get("PER_GENERATION") or {}).get(generation) or {}
     conf_buckets = (cohort_out.get("CONFIDENCE") or {}).get("distribution") \
         or (cohort_out.get("CONFIDENCE_DISTRIBUTION") or {})
     return {
@@ -432,6 +434,19 @@ def outcome_correlation(path: pathlib.Path, cohort_out: dict, generation: str) -
         "soft_struggle_features": [f.get("signal") for f in
                                    (structure.get("SOFT_STRUGGLE_FEATURES") or [])],
         "single_turn_session_subset": structure.get("SINGLE_TURN_SESSION_SUBSET"),
+        # Structural outcome features, when a future deployment has recorded them. These are
+        # request counts, durations and token buckets per turn — never a verdict about routing.
+        "prospective_structural_outcomes": {
+            "available": bool(prospective_gen),
+            "terminal_coverage": {k: prospective_gen.get(k) for k in
+                                  ("ADMITTED_SHADOW_TURNS", "TERMINAL_OUTCOMES",
+                                   "MISSING_TERMINAL_OUTCOMES", "MISSING_TERMINAL_IS_SUCCESS")},
+            "terminal_status_distribution": prospective_gen.get("terminal_status_distribution"),
+            "request_count": prospective_gen.get("api_request_count"),
+            "duration_ms": prospective_gen.get("duration_ms"),
+            "cache_write_observed_turns": prospective_gen.get("api_cache_write_observed_turns"),
+            "note": "structural execution facts only; they cannot rank two models",
+        },
         "selection_bias": "the single-turn session subset is biased and exploratory only",
         "what_this_cannot_say": [
             "that the executing model struggled on a given turn, unless the turn sits in the "

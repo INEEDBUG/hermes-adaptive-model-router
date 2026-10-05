@@ -302,6 +302,114 @@ def join_coverage(records: list, sources: dict, shadow_stats, generation: str) -
     }
 
 
+# ------------------------------------------------------------------ prospective telemetry
+OUTCOME_SCHEMA = "turn-outcome-v1"
+# A record may only carry these keys. Anything else is reported as an unexpected field and its
+# value is never echoed, so a future schema drift cannot smuggle content into an aggregate.
+OUTCOME_KEYS = frozenset({
+    "schema_version", "deployment_generation", "platform", "turn_origin", "turn_correlation",
+    "actual_model_first", "actual_model_last", "model_switch_count", "terminal_status",
+    "duration_ms", "api_request_count", "api_success_count", "api_error_count",
+    "retry_count_observed", "api_input_tokens_sum", "api_output_tokens_sum",
+    "api_cache_read_tokens_sum", "api_cache_write_tokens_sum", "api_input_tokens_max_request",
+    "api_output_tokens_max_request", "api_cache_read_tokens_max_request",
+    "api_cache_write_tokens_max_request", "api_prompt_tokens_max_request", "api_duration_ms_sum",
+    "api_duration_ms_max", "finish_reason_last", "runtime_error_observed",
+    "interrupted_observed", "attribution_quality",
+})
+OUTCOME_STATUSES = ("completed", "interrupted")
+
+
+def _quantiles(values: list) -> dict:
+    if not values:
+        return {"n": 0}
+    ordered = sorted(values)
+    def q(p):
+        return ordered[min(len(ordered) - 1, int(len(ordered) * p))]
+    return {"n": len(ordered), "min": ordered[0], "p50": q(0.5), "p90": q(0.9), "max": ordered[-1],
+            "mean": round(sum(ordered) / len(ordered), 1)}
+
+
+def prospective_aggregate(paths: list, coverage: dict, records: list, sources: dict,
+                        shadow_stats) -> dict:
+    """Aggregate the prospective per-turn outcome records, without exposing any identifier.
+
+    ``turn_correlation`` is a local digest. It is used here only to count how many admitted
+    shadow turns produced a terminal record; the digests themselves are never printed.
+    """
+    rows, bad_schema, unexpected = [], 0, 0
+    for p in paths:
+        for line in pathlib.Path(p).read_text(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("schema_version") != OUTCOME_SCHEMA:
+                bad_schema += 1
+                continue
+            if set(rec) - OUTCOME_KEYS:
+                unexpected += 1
+                continue
+            rows.append(rec)
+
+    by_generation = {}
+    for gen in coverage:
+        gen_rows = [r for r in rows if (r.get("deployment_generation") or "") == gen]
+        digests = {r.get("turn_correlation") for r in gen_rows if r.get("turn_correlation")}
+        admitted = [r for r in records
+                    if (r.get("deployment_generation") or shadow_stats.GENERATION_LEGACY) == gen
+                    and r.get("platform") == "feishu" and r.get("turn_origin") == "user"
+                    and not shadow_stats.classify(r, sources).startswith("excluded")]
+        matched = sum(1 for r in admitted
+                      if hashlib.sha256(str(r.get("turn_id") or "").encode()).hexdigest() in digests)
+        by_generation[gen] = {
+            "ADMITTED_SHADOW_TURNS": len(admitted),
+            "TERMINAL_OUTCOMES": len(gen_rows),
+            "MISSING_TERMINAL_OUTCOMES": max(0, len(admitted) - matched),
+            "MISSING_TERMINAL_IS_SUCCESS": "NO",
+            "terminal_status_distribution": dict(collections.Counter(
+                r.get("terminal_status") for r in gen_rows)),
+            "request_count_distribution": dict(sorted(collections.Counter(
+                int(r.get("api_request_count") or 0) for r in gen_rows).items())),
+            "api_request_count": _quantiles([int(r.get("api_request_count") or 0) for r in gen_rows]),
+            "duration_ms": _quantiles([int(r.get("duration_ms") or 0) for r in gen_rows]),
+            "api_input_tokens_sum": _quantiles([int(r.get("api_input_tokens_sum") or 0) for r in gen_rows]),
+            "api_output_tokens_sum": _quantiles([int(r.get("api_output_tokens_sum") or 0) for r in gen_rows]),
+            "api_cache_read_tokens_sum": _quantiles(
+                [int(r.get("api_cache_read_tokens_sum") or 0) for r in gen_rows]),
+            "api_cache_write_tokens_sum": _quantiles(
+                [int(r.get("api_cache_write_tokens_sum") or 0) for r in gen_rows]),
+            "api_prompt_tokens_max_request": _quantiles(
+                [int(r.get("api_prompt_tokens_max_request") or 0) for r in gen_rows]),
+            "api_duration_ms_sum": _quantiles([int(r.get("api_duration_ms_sum") or 0) for r in gen_rows]),
+            "api_cache_write_observed_turns": sum(
+                1 for r in gen_rows if int(r.get("api_cache_write_tokens_sum") or 0) > 0),
+            "runtime_error_observed_turns": sum(
+                1 for r in gen_rows if r.get("runtime_error_observed")),
+            "retry_observed_turns": sum(1 for r in gen_rows
+                                        if int(r.get("retry_count_observed") or 0) > 0),
+            "model_switch_observed_turns": sum(
+                1 for r in gen_rows if int(r.get("model_switch_count") or 0) > 0),
+            "attribution_quality": sorted({str(r.get("attribution_quality")) for r in gen_rows}),
+        }
+    return {
+        "FILES": [pathlib.Path(p).name for p in paths],
+        "RECORDS": len(rows),
+        "REJECTED_SCHEMA_RECORDS": bad_schema,
+        "REJECTED_UNEXPECTED_FIELD_RECORDS": unexpected,
+        "SCHEMA_VERSION_EXPECTED": OUTCOME_SCHEMA,
+        "TERMINAL_STATUS_ENUM": list(OUTCOME_STATUSES),
+        "MISSING_TERMINAL_IS_SUCCESS": "NO",
+        "PER_GENERATION": by_generation,
+        "CORRELATION_NOT_CAUSATION": "YES",
+        "no_identifier_in_output": "raw turn ids and correlation digests are never printed",
+    }
+
+
 # ------------------------------------------------------------------ structure
 def struggle_structure(coverage_canonical: dict, rel: list) -> dict:
     return {
@@ -402,6 +510,9 @@ def main(argv=None) -> int:
                     or (pathlib.Path(os.environ.get("HERMES_HOME") or "/opt/data") / "state.db"))))
     ap.add_argument("--context-guard-telemetry", default=str(pathlib.Path(os.environ.get("HERMES_HOME")
                     or "/opt/data") / "logs" / "context-guard" / "telemetry.jsonl"))
+    ap.add_argument("--prospective-telemetry", default=None,
+                    help="turn-outcome-v1 JSONL file, or a directory of them. Default: "
+                         "<log-dir>/outcomes when it exists")
     ap.add_argument("--json", default=None, help="write the aggregate here (never inside the deployment)")
     args = ap.parse_args(argv)
 
@@ -481,6 +592,26 @@ def main(argv=None) -> int:
     out["STRUGGLE_STRUCTURE"] = struggle_structure(canon_cov, [])
     out["RETROSPECTIVE_STRUGGLE_ANALYSIS"] = (
         "NOT_POSSIBLE" if not canon_cov.get("TOTAL_HUMAN_TURNS") else "DESCRIPTIVE_ONLY")
+    # ---- prospective per-turn outcome telemetry (optional; historical audit unchanged) ----
+    telemetry_paths = []
+    if args.prospective_telemetry:
+        given = pathlib.Path(args.prospective_telemetry)
+        telemetry_paths = ([given] if given.is_file()
+                           else sorted(given.glob("turn-outcome-*.jsonl")))
+    else:
+        default_dir = pathlib.Path(args.log_dir) / "outcomes"
+        if default_dir.is_dir():
+            telemetry_paths = sorted(default_dir.glob("turn-outcome-*.jsonl"))
+    if telemetry_paths:
+        out["PROSPECTIVE_OUTCOME_TELEMETRY"] = prospective_aggregate(
+            telemetry_paths, coverage, records, sources, shadow_stats)
+    out["PER_REQUEST_USAGE_AVAILABLE"] = "YES"
+    out["PER_TURN_BILLED_USAGE_AVAILABLE_PROSPECTIVELY"] = "YES"
+    out["PER_TURN_CONTEXT_SNAPSHOT_AVAILABLE"] = "NO"
+    out["PER_TURN_CACHE_READ_SUM_AVAILABLE"] = "YES"
+    out["PER_TURN_CACHE_WRITE_SUM_AVAILABLE"] = "YES"
+    out["PER_TURN_CACHE_HIT_BOOLEAN_AVAILABLE"] = "NO"
+    out["CACHE_SWITCH_COUNTERFACTUAL_COST"] = "NO"
     out["RETROSPECTIVE_NOTE"] = ("exact per-turn aggregates are unavailable for multi-turn sessions, and the "
                                  "single-turn subset is tiny and biased, so no incidence or median difference "
                                  "may be reported as evidence")

@@ -1,8 +1,11 @@
 """Hermes Agent plugin: shadow-only routing observer.
 
-The plugin registers exactly one hook, ``pre_api_request``, which fires before an
-LLM call. On the first call of a turn it builds a minimal Routing Dossier from the
-current user message, hands it to a background worker and returns.
+The plugin registers the routing hook ``pre_api_request`` (which fires before an LLM call) plus
+four content-free prospective outcome-telemetry hooks — ``post_api_request``,
+``api_request_error``, ``post_llm_call`` and ``agent_loop_stopped``. On the first call of a turn,
+``pre_api_request`` builds a minimal Routing Dossier from the current user message, hands it to a
+background worker, opens a per-turn outcome accumulator for an admitted human turn, and returns.
+Everything the outcome hooks record is structural execution fact; see :mod:`router.outcome`.
 
 Guarantees
 ----------
@@ -160,7 +163,7 @@ def _admit(kwargs: dict) -> tuple:
 
 def _on_pre_api_request(**kwargs):
     try:
-        from router import config, dossier, shadow, skip_telemetry
+        from router import config, dossier, outcome, shadow, skip_telemetry
 
         mode = _resolve_mode()
         if mode == 'off':
@@ -173,6 +176,11 @@ def _on_pre_api_request(**kwargs):
         if not admitted:
             return None
         # --- end boundary -------------------------------------------------------------
+
+        # Prospective per-turn outcome telemetry: an accumulator exists only for an admitted
+        # human turn, and it is created after the same boundary the routing observation uses —
+        # never by a second, divergent notion of "human turn".
+        outcome.start(kwargs, platform=platform, turn_origin=origin)
 
         user_message = kwargs.get('user_message')
         if not isinstance(user_message, str) or not user_message.strip():
@@ -205,8 +213,60 @@ def _on_pre_api_request(**kwargs):
     return None
 
 
+# ---------------------------------------------------------------------------------------
+# Prospective outcome telemetry handlers.
+#
+# Each one is deliberately tiny, content-blind, and wrapped so that a failure can never reach
+# the agent turn: OUTCOME_TELEMETRY_FAILURE_POLICY is FAIL_OPEN_FOR_HERMES_EXECUTION and
+# FAIL_CLOSED_FOR_ANALYTICS. Response, error and terminal hooks carry no turn_origin, so they
+# never re-admit a turn; they resolve it through the accumulator the boundary already created.
+# ---------------------------------------------------------------------------------------
+def _on_post_api_request(**kwargs):
+    try:
+        from router import outcome
+
+        outcome.observe_response(kwargs)
+    except Exception:
+        pass
+    return None
+
+
+def _on_api_request_error(**kwargs):
+    try:
+        from router import outcome
+
+        outcome.observe_error(kwargs)
+    except Exception:
+        pass
+    return None
+
+
+def _on_post_llm_call(**kwargs):
+    try:
+        from router import outcome
+
+        outcome.finalize(kwargs, 'completed')
+    except Exception:
+        pass
+    return None
+
+
+def _on_agent_loop_stopped(**kwargs):
+    try:
+        from router import outcome
+
+        outcome.interrupted(kwargs)
+    except Exception:
+        pass
+    return None
+
+
 def register(ctx) -> None:
     ctx.register_hook('pre_api_request', _on_pre_api_request)
+    ctx.register_hook('post_api_request', _on_post_api_request)
+    ctx.register_hook('api_request_error', _on_api_request_error)
+    ctx.register_hook('post_llm_call', _on_post_llm_call)
+    ctx.register_hook('agent_loop_stopped', _on_agent_loop_stopped)
     try:
         import logging
 

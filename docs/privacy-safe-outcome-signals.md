@@ -247,3 +247,168 @@ the routing-quality analyser.
 
 `G1_REAL_TRAFFIC_SAMPLE` remains `INSUFFICIENT`: struggle features do not add sample breadth,
 longitudinal evidence, concurrency coverage or context/cache instrumentation.
+
+# Prospective telemetry implementation candidate
+
+**Repository implementation only. NOT deployed.** Production still runs `canonical-dff8b11` in
+`shadow` with Auto disabled, and no environment variable was set.
+
+Read this part with the following consequences in mind:
+
+* per-turn exact figures start existing only **after a future deployment**; nothing here makes the
+  historical records exact retroactively;
+* `missing terminal != success` — a turn whose terminal hook was never observed leaves no record,
+  and analytics must keep the gap visible (`ADMITTED_SHADOW_TURNS - TERMINAL_OUTCOMES`);
+* billed usage is not context size: `api_input_tokens_sum` sums the **uncached** input bucket over
+  the physical requests of a turn, and a tool loop repeats the context on every request;
+* `DEFAULT_MODEL_STRUGGLE != MIMO_WOULD_BE_BETTER` — the candidate records structural execution
+  facts and can never express a counterfactual model win.
+
+## Hook payload contract (re-pinned from the Hermes source, not from prose)
+
+Every cell states `PRESENT`, `ABSENT` or `CONDITIONAL` for the payload the hook actually receives.
+
+| field | pre_api_request | post_api_request | api_request_error | post_llm_call | agent_loop_stopped |
+| --- | --- | --- | --- | --- | --- |
+| `turn_id` | PRESENT | PRESENT | PRESENT | PRESENT | **ABSENT** |
+| `session_id` | PRESENT | PRESENT | PRESENT | PRESENT | **ABSENT** (`session_key` only) |
+| `task_id` | PRESENT | PRESENT | PRESENT | PRESENT | ABSENT |
+| `platform` | PRESENT | PRESENT | PRESENT | PRESENT | PRESENT |
+| `turn_origin` | PRESENT (the gateway's structural label) | **ABSENT** | **ABSENT** | **ABSENT** | **ABSENT** |
+| `model` | PRESENT | PRESENT (`response_model` too) | PRESENT | PRESENT | ABSENT |
+| `api_call_count` | PRESENT | PRESENT | PRESENT | ABSENT | ABSENT |
+| `retry_count` | PRESENT | ABSENT | PRESENT (`max_retries`, `retryable` too) | ABSENT | ABSENT |
+| `usage` | ABSENT | PRESENT (normalized buckets) | ABSENT | ABSENT | ABSENT |
+| `finish_reason` | ABSENT | PRESENT | ABSENT | ABSENT | ABSENT |
+| `api_duration` | ABSENT (`started_at` only) | PRESENT | PRESENT | ABSENT | ABSENT |
+| status / error metadata | `retry_count` only | `assistant_content_chars`, `assistant_tool_call_count` | `status_code`, `reason`, `retryable`, error type (CONDITIONAL) | ABSENT | `reason`, `invalidation_reason` |
+| content-bearing keys | `user_message`, `conversation_history`, `request_messages`, `system_prompt`, `request` | `response`, `assistant_message` | `error`, `request` | `user_message`, `assistant_response`, `conversation_history` | none |
+
+Two facts drive the design:
+
+* `turn_origin` exists **only** on `pre_api_request`, so the accumulator is created there, on the
+  plugin's existing admission; the other hooks can only *resolve* a turn, never admit one.
+* `agent_loop_stopped` carries a session key and no turn id, so an interruption can only be
+  attributed when exactly one open accumulator matches that key.
+
+`CONTENT_BLIND = YES`: the handlers copy only allow-listed keys out of the payload, so even though
+the content-bearing keys above are present in `kwargs`, nothing here reads, copies, hashes,
+inspects or serializes them.
+
+## Normalized usage semantics
+
+`agent/usage_pricing.normalize_usage()` maps every provider shape onto one canonical shape, so the
+buckets mean the same thing regardless of provider:
+
+```
+input_tokens       = the UNCACHED portion (Anthropic reports it directly; Chat/Codex totals
+                     include cached tokens and the cache buckets are subtracted back out)
+cache_read_tokens  = prompt-cache hits
+cache_write_tokens = prompt-cache writes
+output_tokens      = generated tokens
+prompt_tokens      = input_tokens + cache_read_tokens + cache_write_tokens   (derived)
+total_tokens       = prompt_tokens + output_tokens                           (derived)
+```
+
+Therefore:
+
+```
+API_INPUT_TOKENS_SUM          = the uncached input bucket summed over a turn's physical requests
+API_INPUT_TOKENS_MAX_REQUEST  = the largest single request's uncached input bucket
+API_PROMPT_TOKENS_MAX_REQUEST = the largest single request's full consumed context
+                                (input + cache_read + cache_write), recomputed by this candidate
+MAX_REQUEST_INPUT_CAN_APPROXIMATE_CONTEXT = PARTIAL
+```
+
+`PARTIAL` and not `YES`: a request's `prompt_tokens` is the tokens that request consumed, which is
+close to its context size but is not a snapshot of it, and the *uncached* input alone says nothing
+about context size. Neither number may be called a ground-truth context snapshot. One provider
+caveat is recorded in the source itself: on MiniMax-M3's Anthropic wire `cache_read` carries a
+constant floor and is not a reliable hit signal.
+
+## Turn correlation
+
+```
+TURN_CORRELATION_SCHEME = sha256(structural turn_id), full 64-hex digest, local join only
+```
+
+The digest is computed from the structural `turn_id` and from nothing else — not from a prompt, a
+message, or a dossier. Raw identifiers are not written to the record. The digest is private and
+local: it is not an identity, it does not enter a public aggregate, and an analyzer that wants to
+join it to routing telemetry re-hashes the shadow record's `turn_id` locally instead of reading an
+identifier out of the telemetry.
+
+## Accumulator state machine
+
+```
+admit (pre_api_request, first call of the turn)  -> OPEN
+OPEN + post_api_request      -> OPEN   (request counters, usage buckets, duration, finish reason, model)
+OPEN + api_request_error     -> OPEN   (error/retry counters only; never a terminal)
+OPEN + post_llm_call         -> COMPLETED -> at most one record written -> accumulator dropped
+OPEN + agent_loop_stopped    -> INTERRUPTED -> record written only if exactly one open turn
+                                 matches the session key; then dropped
+terminal/unknown turn + any hook -> ignored (no second record, no rewrite)
+never observed terminal     -> NO RECORD (MISSING_TERMINAL, never success)
+```
+
+Bounded memory: at most `_MAX_OPEN = 64` open accumulators, at most 512 remembered request ids per
+turn and at most 8 model labels. Eviction drops the **oldest unfinished** accumulator and never
+writes a record for it.
+
+## Record schema
+
+```
+schema_version              "turn-outcome-v1"
+deployment_generation       content-free generation label
+platform / turn_origin      closed labels from the boundary
+turn_correlation            sha256 digest (local join only)
+actual_model_first / _last / model_switch_count
+terminal_status             "completed" | "interrupted"   (closed enum)
+duration_ms                 first seen -> terminal
+api_request_count / api_success_count / api_error_count / retry_count_observed
+api_input_tokens_sum / api_output_tokens_sum
+api_cache_read_tokens_sum / api_cache_write_tokens_sum
+api_input_tokens_max_request / api_output_tokens_max_request
+api_cache_read_tokens_max_request / api_cache_write_tokens_max_request
+api_prompt_tokens_max_request
+api_duration_ms_sum / api_duration_ms_max
+finish_reason_last          short enum token or null
+runtime_error_observed / interrupted_observed
+attribution_quality         "EXACT_PROSPECTIVE"
+```
+
+`terminal_status` stays a two-value enum. `failed` and `cancelled` are absent because no hook
+proves them today: a request error does not end a turn, and `agent_loop_stopped` reports an
+interruption. A wrong classification is worse than a missing record, so
+`MISSING_TERMINAL_IS_SUCCESS = NO`.
+
+## Failure policy
+
+```
+OUTCOME_TELEMETRY_FAILURE_POLICY = FAIL_OPEN_FOR_HERMES_EXECUTION + FAIL_CLOSED_FOR_ANALYTICS
+```
+
+Recording can never raise into a turn, block a request, or change model execution; every handler
+returns `None` and swallows its own failure. Analytics can never read absence as success: the
+analyzer reports `MISSING_TERMINAL_OUTCOMES` against the shadow-turn denominator.
+
+Writing is append-only JSONL under `<JEV_LOG_DIR>/outcomes/turn-outcome-YYYY-MM-DD.jsonl` — a
+separate file per UTC day, never inside `shadow-*.jsonl`, because the two schemas differ and mixing
+them would make either unreadable by its own tooling. Lines are appended with `O_APPEND` (no
+truncation, no rewrite), the writer is thread-safe, and the modes request owner-only access.
+
+## Future deployment delta (reported, not applied)
+
+```
+PLUGIN_HOOKS_TO_ADD = post_api_request, api_request_error, post_llm_call, agent_loop_stopped
+                      (pre_api_request already registered)
+NEW_RUNTIME_FILES   = router/outcome.py
+NEW_TELEMETRY_PATH  = <JEV_LOG_DIR>/outcomes/turn-outcome-YYYY-MM-DD.jsonl
+NEW_ENV_KEYS        = none — the existing JEV_LOG_DIR already defines the telemetry root, and a
+                      separate subdirectory is enough to keep the schemas apart
+RESTART_REQUIRED    = YES — a plugin hook-registration change only takes effect on a new process,
+                      so a future deployment needs a new frozen runtime generation plus one
+                      controlled official restart
+```
+
+Nothing in this section authorises enabling Auto, and nothing here is deployed.
