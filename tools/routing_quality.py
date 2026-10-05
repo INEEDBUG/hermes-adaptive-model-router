@@ -405,7 +405,44 @@ def longitudinal(rows):
 
 
 # --------------------------------------------------------------------------- signals
-def signal_inventory(db_path: pathlib.Path):
+def outcome_correlation(path: pathlib.Path, cohort_out: dict, generation: str) -> dict:
+    """Pair the routing cohort with a privacy-safe outcome aggregate, read only.
+
+    The pair is deliberately weak, because the historical data is weak: struggle values are not
+    exactly attributable to a turn outside the single-turn subset, so this view reports join
+    coverage and attribution quality next to the routing distribution instead of inventing a
+    per-turn correlation that the data cannot support.
+    """
+    try:
+        agg = json.loads(path.read_text())
+    except Exception as exc:
+        return {"status": "OUTCOME_AGGREGATE_UNREADABLE", "error": str(exc)}
+    coverage = (agg.get("HISTORICAL_OUTCOME_JOIN_COVERAGE") or {}).get(generation) or {}
+    structure = agg.get("STRUGGLE_STRUCTURE") or {}
+    conf_buckets = (cohort_out.get("CONFIDENCE") or {}).get("distribution") \
+        or (cohort_out.get("CONFIDENCE_DISTRIBUTION") or {})
+    return {
+        "status": "READ_ONLY_VIEW",
+        "CORRELATION_NOT_CAUSATION": "YES",
+        "generation": generation,
+        "routing_confidence_distribution": conf_buckets,
+        "outcome_join_coverage": {k: v for k, v in coverage.items() if k != "PER_SIGNAL"},
+        "outcome_per_signal_join": coverage.get("PER_SIGNAL"),
+        "hard_struggle_signal_available": structure.get("HARD_STRUGGLE_SIGNAL_AVAILABLE"),
+        "soft_struggle_features": [f.get("signal") for f in
+                                   (structure.get("SOFT_STRUGGLE_FEATURES") or [])],
+        "single_turn_session_subset": structure.get("SINGLE_TURN_SESSION_SUBSET"),
+        "selection_bias": "the single-turn session subset is biased and exploratory only",
+        "what_this_cannot_say": [
+            "that the executing model struggled on a given turn, unless the turn sits in the "
+            "single-turn subset",
+            "that the other model would have performed better: no counterfactual exists",
+            "that the router policy is right or wrong: no ground truth exists",
+        ],
+    }
+
+
+def signal_inventory(db_path: pathlib.Path) -> dict:
     """Probe which outcome/context/cache signals already exist (schema level, read only)."""
     import sqlite3
     res = {"STATE_DB_PRESENT": db_path.exists(), "SIGNALS": []}
@@ -532,6 +569,9 @@ def main(argv=None) -> int:
     ap.add_argument("--features", action="store_true")
     ap.add_argument("--longitudinal", action="store_true")
     ap.add_argument("--signals", action="store_true")
+    ap.add_argument("--outcome-aggregate", default=None,
+                    help="optional privacy-safe outcome-signal aggregate from tools/outcome_signals.py; "
+                         "adds a correlation view without changing any other output")
     ap.add_argument("--state-db", default=str(pathlib.Path(os.environ.get("HERMES_HOME") or "/opt/data") / "state.db"))
     ap.add_argument("--contamination-ledger", default=None)
     ap.add_argument("--json", default=None, help="write the aggregate JSON here (never inside the deployment)")
@@ -607,6 +647,9 @@ def main(argv=None) -> int:
             out["COUNTER_CONTAMINATION"] = {"status": "LEDGER_UNREADABLE", "error": str(exc)}
     if args.signals:
         out["OUTCOME_SIGNAL_INVENTORY"] = signal_inventory(pathlib.Path(args.state_db))
+    if args.outcome_aggregate:
+        out["OUTCOME_CORRELATION"] = outcome_correlation(
+            pathlib.Path(args.outcome_aggregate), out.get("COHORT") or {}, args.generation)
 
     payload = json.dumps(out, indent=2, sort_keys=True, default=str)
     if args.json:
