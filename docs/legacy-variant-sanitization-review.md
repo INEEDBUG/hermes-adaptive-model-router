@@ -90,6 +90,10 @@ branch that looks like a working variant), redundant privacy exposure and perman
 a line that must never merge. The genuinely reusable part is the model, and it belongs in main
 as documentation.
 
+The procedure for those acts, including the immutable runtime layout, the counter
+continuity rule, quiescence, acceptance gates and the rollback policy, is
+[`controlled-production-convergence.md`](controlled-production-convergence.md).
+
 ## 7. What main still needs before convergence
 
 Nothing further in code. Convergence is blocked only by deployment-side configuration acts,
