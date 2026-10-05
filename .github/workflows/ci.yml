@@ -63,6 +63,12 @@ jobs:
       - name: privacy-safe outcome signals (joinability audit, offline)
         run: python3 tests/test_outcome_signals.py
 
+      # The prospective telemetry candidate is not deployed: this suite drives the real
+      # handlers offline and proves content blindness, single terminal per turn, concurrency
+      # isolation and sentinel byte-identity.
+      - name: prospective outcome telemetry (offline, content-blind)
+        run: python3 tests/test_outcome_telemetry.py
+
       - name: state initialiser (dry run)
         run: python3 tools/init_state.py --dry-run
 
