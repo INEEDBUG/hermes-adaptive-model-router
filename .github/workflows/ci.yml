@@ -55,6 +55,14 @@ jobs:
       - name: convergence rehearsal (generation metadata, boundary, redaction, dossier)
         run: python3 tests/test_convergence_rehearsal.py
 
+      # Both analysis tools are offline and read-only, and their suites emulate a live
+      # deployment at sentinel paths to prove that an offline run cannot read or write one.
+      - name: routing-quality aggregates (generation-aware, offline)
+        run: python3 tests/test_routing_quality.py
+
+      - name: privacy-safe outcome signals (joinability audit, offline)
+        run: python3 tests/test_outcome_signals.py
+
       - name: state initialiser (dry run)
         run: python3 tools/init_state.py --dry-run
 
