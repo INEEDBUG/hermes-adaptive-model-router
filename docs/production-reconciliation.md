@@ -101,6 +101,10 @@ work, and it must proceed in this order:
 publishing evidence or repairing CI in this repository changes nothing about what a
 deployment runs; installation is a separate authorised act.
 
+What of the private variant is worth keeping as history, and whether a public legacy branch is
+justified, is settled in
+[`legacy-variant-sanitization-review.md`](legacy-variant-sanitization-review.md).
+
 ## Migration mechanics that now exist in this repository
 
 Two mechanisms were added so that a convergence install can be rehearsed and then audited
