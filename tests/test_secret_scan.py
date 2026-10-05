@@ -25,6 +25,13 @@ FAKE_KEY = 'sk-' + 'abcDEF1234567890xyzABC'
 FAKE_MAIL = 'somebody' + '@' + 'realcorp.cn'
 MARKER = 'host_or_project_identifiers'          # a pattern *name*, not a matched value
 ALLOWED_MAIL = 'a.b@example.com'                # in the scanner's allow list (match-scoped)
+# The one public identity the scanner allow-lists by exact address. Assembled at run time so
+# this test file itself never contains an email-shaped literal.
+ALLOWED_NOREPLY = '97193467' + '+INEEDBUG' + '@' + 'users.noreply.github.com'
+# Any *other* noreply address must still be reported: the exemption is the address, not the
+# domain, the account or the word "noreply".
+OTHER_NOREPLY = 'someone' + '-else' + '+PUBLIC' + '@' + 'users.noreply.github.com'
+PRIVATE_MAIL = 'person' + '@' + 'privatecorp.cn'
 
 R = []
 
@@ -213,6 +220,35 @@ try:
     rc, out = run_scan(k)
     chk('E6 a header with a short synthetic body is not a finding (negative control)',
         rc == 0, f'rc={rc}')
+
+    # --- one exact public identity is allow-listed, the pattern itself stays sharp -------
+    print('=== F. exact public identity exemption ===')
+    n = tmp / 'noreply_allow'
+    n.mkdir()
+    write_tree(n, {'evidence.md': f'commit identity: {ALLOWED_NOREPLY}\n'})
+    rc, out = run_scan(n)
+    chk('F1 the one allow-listed public noreply address is clean', rc == 0, f'rc={rc}')
+
+    o = tmp / 'noreply_other'
+    o.mkdir()
+    write_tree(o, {'evidence.md': f'commit identity: {OTHER_NOREPLY}\n'})
+    rc, out = run_scan(o)
+    chk('F2 a different @users.noreply.github.com address is still reported (MUST fail)',
+        rc == 1 and 'email' in out, f'rc={rc}')
+
+    q = tmp / 'private_mail'
+    q.mkdir()
+    write_tree(q, {'evidence.md': f'contact: {PRIVATE_MAIL}\n'})
+    rc, out = run_scan(q)
+    chk('F3 an ordinary private-looking address is still reported (MUST fail)',
+        rc == 1 and 'email' in out, f'rc={rc}')
+
+    r = tmp / 'noreply_plus_secret'
+    r.mkdir()
+    write_tree(r, {'evidence.md': f'{ALLOWED_NOREPLY} DEEPSEEK_API_KEY={FAKE_KEY}\n'})
+    rc, out = run_scan(r)
+    chk('F4 the allowed identity cannot exempt a real-shaped secret on the same line (MUST fail)',
+        rc == 1 and 'prefixed_api_key' in out, f'rc={rc}')
 
 finally:
     shutil.rmtree(tmp, ignore_errors=True)

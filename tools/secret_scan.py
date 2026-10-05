@@ -88,6 +88,14 @@ ALLOW_LIST = [
     'MIIEfake',
     'REDACTED',
     'sk-liveFAKE',
+    # One exact public identity: the GitHub noreply address used by this repository's own
+    # automation commits. It names the project's own account in public commit metadata and
+    # carries no private information, so a history scan of a workflow that set it as
+    # ``user.email`` is a false positive. Deliberately the **complete address**, never the
+    # domain, the account name or a bare ``noreply`` substring: any other
+    # ``…@users.noreply.github.com`` address, and every private-looking address, is still
+    # reported (see tests/test_secret_scan.py group F).
+    '97193467+INEEDBUG@users.noreply.github.com',
 ]
 
 SKIP_DIRS = {'.git', '__pycache__', '.venv', 'node_modules', '.mypy_cache', '.pytest_cache'}
