@@ -107,6 +107,17 @@ flowchart TD
 这里不做出任何成本节省、性能或规模方面的声明：真实 shadow 轮次的样本刻意保持很小，
 并且以分布形式呈现，而不是以头条数字呈现。
 
+对上面这张表的两点限定说明（都在公开仓库中跟踪）：
+
+- **规范线与实际部署的区别。** `main` 上的公开 v0.2.0 是**规范**仓库线；当前观测到的
+  一个私有生产部署仍处于 shadow、auto 关闭状态，但它与本仓库**存在部署漂移**
+  （包括路由可用性语义），因此它并非生产环境的逐字节描述。见
+  [docs/production-reconciliation.md](docs/production-reconciliation.md)。
+- **G1 证据已存在，但 G1 未通过。** 聚合后的 content-free shadow 证据已发布在
+  [docs/g1-shadow-evidence-2026-10-06.md](docs/g1-shadow-evidence-2026-10-06.md)，
+  且 `G1_REAL_TRAFFIC_SAMPLE` 仍为 **INSUFFICIENT**。生产收敛先于任何 auto-routing 工作；
+  路线图与进展见 [issue #1](https://github.com/INEEDBUG/hermes-adaptive-model-router/issues/1)。
+
 ## 工作原理
 
 1. **Hook。** 该 plugin 只注册一个观察者 hook（`pre_api_request`），Hermes 核心本就

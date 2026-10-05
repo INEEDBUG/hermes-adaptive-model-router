@@ -102,10 +102,14 @@ Switching a provider is not free. The cost has three components:
 
 1. **Prompt cache miss.** A provider caches the conversation prefix. Switching
    providers invalidates the cache on *both* sides — the new provider must reprocess
-   the prefix uncached, and the old provider's cache goes cold. In measured
-   production usage the cached prefix dominated the per-turn input (cached input
-   tokens exceeded fresh input tokens by one to two orders of magnitude), so
-   per-turn switching can cost more than the routing saves.
+   the prefix uncached, and the old provider's cache goes cold, so per-turn switching
+   can cost more than the routing saves. The direction of this effect is the design
+   concern; its magnitude is a **prior observation that current public telemetry does
+   not represent**, so no quantity is claimed here: neither the shadow record nor the
+   stream telemetry carries a conversation-context or prompt-cache size (see
+   "Not yet measurable" below, and the limitations listed in
+   `docs/g1-shadow-evidence-2026-10-06.md`). Collecting those two signals is a
+   prerequisite for evaluating this rule, not an optional extra.
 2. **Runtime reconstruction.** A model change rebuilds the provider client and
    re-resolves reasoning/compression configuration for the new model; the session's
    cached agent for the previous route is discarded.
@@ -168,6 +172,15 @@ assuming a provider exists is exactly how an unvalidated route reaches productio
 | G4 | Auto enabled for a bounded window (`auto_until`) with a fresh heartbeat, and sticky routing active |
 
 Failure to satisfy any gate keeps the router in shadow mode.
+
+**Gate status (2026-10-06).** G0 passes (shadow only) and G0b passes (the provenance drift
+check exits `0`). G1 is **INSUFFICIENT**: a content-free snapshot of real human-origin
+traffic is published in `docs/g1-shadow-evidence-2026-10-06.md`, but that sample cannot yet
+evaluate the rule above — 7 sampled days with an uneven day distribution, no longitudinal
+consecutive-turn analysis, no conversation-context or prompt-cache signal, and a
+production deployment whose `would_execute` semantics differ from this repository's
+(`docs/production-reconciliation.md`). G2, G3 and G4 are not started, and automatic
+switching remains off.
 
 **The drift check is part of the upgrade procedure, not an optional extra.** The
 provenance label this design depends on comes from a Hermes integration patch, so the
