@@ -111,11 +111,14 @@ numbers.
 
 Two statements qualify that table, and both are tracked publicly:
 
-- **Canonical line vs observed deployment.** Public v0.2.0 on `main` is the canonical
-  repository line. A currently observed private production deployment is still
-  shadow-only with auto disabled, but **has deployment drift** from this repository
-  (including the route-availability semantics); it is therefore not a byte-for-byte
-  description of production. See [docs/production-reconciliation.md](docs/production-reconciliation.md).
+- **Canonical line and observed deployment.** Public v0.2.0 on `main` is the canonical
+  repository line, and the observed production deployment is now **aligned to the canonical
+  runtime candidate** (`dff8b117d38f597617497fca5567b0e7ec0bde9a`, generation
+  `canonical-dff8b11`): it is the canonical shadow implementation, not a private variant, so
+  the earlier deployment drift no longer applies. It still runs shadow-only with auto
+  disabled, and a real human canary has been observed on that generation. See
+  [docs/production-convergence-closeout-2026-10-06.md](docs/production-convergence-closeout-2026-10-06.md);
+  the earlier drift analysis is historical: [docs/production-reconciliation.md](docs/production-reconciliation.md).
 - **G1 evidence exists, G1 is not passed.** Aggregated content-free shadow evidence is
   published in [docs/g1-shadow-evidence-2026-10-06.md](docs/g1-shadow-evidence-2026-10-06.md),
   and `G1_REAL_TRAFFIC_SAMPLE` remains **INSUFFICIENT**. Production convergence is
