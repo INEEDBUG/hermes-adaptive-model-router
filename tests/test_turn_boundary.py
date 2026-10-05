@@ -36,6 +36,15 @@ os.environ['JEV_STATE_DIR'] = str(TMP / 'state')
 os.environ['HERMES_HOME'] = str(TMP / 'home')
 os.environ['HERMES_ENV_PATH'] = str(TMP / 'home' / '.env')
 os.environ['ROUTER_MODE'] = 'shadow'
+# Without this the counter path falls back to the ambient environment, which in a configured
+# deployment is the gateway's own exported JEV_SKIP_COUNTER_PATH: this suite would then write
+# its fixture rejections into the production counter series.
+os.environ['JEV_SKIP_COUNTER_PATH'] = str(TMP / 'logs' / 'skipped-non-user-turn.json')
+# Ambient JEV_* values exported by a running gateway must not reach an offline assertion.
+for _k in ('JEV_AVAILABLE_ROUTES', 'JEV_DEPLOYMENT_GENERATION', 'JEV_ROUTER_ROOT',
+           'JEV_ALLOWED_PLATFORMS', 'JEV_MIN_CONFIDENCE', 'JEV_MIN_MARGIN', 'JEV_TIMEOUT_SECONDS',
+           'JEV_MODEL'):
+    os.environ.pop(_k, None)
 os.environ.pop('JEV_AUTO_APPROVED', None)
 
 from router import config, skip_telemetry  # noqa: E402

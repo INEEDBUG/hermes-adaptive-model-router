@@ -29,8 +29,28 @@ if os.environ.get('RUN_LIVE_TESTS') == '1':
     if _env_file:
         config.ENV_PATH = pathlib.Path(_env_file)
 else:
+    # Not just the .env file: the gateway exports its own environment to every child
+    # process, so a configured deployment leaks JEV_* into this suite. Offline runs must
+    # neither read that configuration nor write to a deployment's log / state / counter
+    # paths, so the paths this module resolves are redirected to a private temp tree.
+    _tmp = pathlib.Path(tempfile.mkdtemp(prefix='jev-router-suite-'))
     config.ENV_PATH = ROOT / 'tests' / 'nonexistent.env'
+    config.LOG_DIR = _tmp / 'logs'
+    os.environ.update({
+        'HERMES_HOME': str(_tmp / 'home'),
+        'HERMES_ENV_PATH': str(_tmp / 'home' / '.env'),
+        'JEV_LOG_DIR': str(_tmp / 'logs'),
+        'JEV_STATE_DIR': str(_tmp / 'state'),
+        'JEV_ROUTER_ROOT': str(_tmp / 'runtime'),
+        'JEV_SKIP_COUNTER_PATH': str(_tmp / 'logs' / 'skipped-non-user-turn.json'),
+    })
+# Values the deployment exported: every value this suite depends on is set explicitly by
+# the assertion that needs it, so any inherited one is cleared.
+for _k in ('JEV_AVAILABLE_ROUTES', 'JEV_DEPLOYMENT_GENERATION', 'JEV_ALLOWED_PLATFORMS',
+           'JEV_MIN_CONFIDENCE', 'JEV_MIN_MARGIN', 'JEV_TIMEOUT_SECONDS', 'JEV_MODEL', 'ROUTER_MODE'):
+    os.environ.pop(_k, None)
 config._cache['at'] = 0
+config._cache['env'] = {}
 
 R = []
 
