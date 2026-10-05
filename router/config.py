@@ -32,6 +32,14 @@ DEFAULTS = {
     # Gate 1 of the human-turn boundary: platforms whose *human* turns may be observed.
     # Empty means "none" — routing stays inert until an operator names them (fail-closed).
     'JEV_ALLOWED_PLATFORMS': '',
+    # Optional path override for the content-free rejection counters. A converged
+    # deployment points this at an existing counter file (e.g. an earlier deployment's
+    # ``skipped-non-user-turn.json``) so that months of counters are not orphaned by a
+    # filename change. Empty means the canonical filename inside the log directory.
+    'JEV_SKIP_COUNTER_PATH': '',
+    # Content-free deployment generation label written into new telemetry records.
+    # See deployment_generation().
+    'JEV_DEPLOYMENT_GENERATION': '',
     # Optional defense-in-depth markers, separated by '||'. This is an anomaly detector,
     # never the boundary: the authoritative condition is turn_origin == 'user'. Empty
     # disables it.
@@ -131,6 +139,33 @@ def available_routes() -> tuple:
     return tuple(out)
 
 
+# ---------------------------------------------------------------------------
+# Deployment generation (migration metadata)
+# ---------------------------------------------------------------------------
+# Telemetry written before this key existed carries no generation field; the statistics
+# tool reads those records as ``legacy_unversioned``. A deployment that declares nothing
+# gets the stable default below, which deliberately does not claim to be the canonical
+# line: only the operator knows which generation is installed. A convergence install sets
+# JEV_DEPLOYMENT_GENERATION (e.g. 'canonical-0.2.0').
+GENERATION_DEFAULT = 'unversioned'
+GENERATION_LEGACY = 'legacy_unversioned'
+GENERATION_MAX_LEN = 64
+_GENERATION_RX = re.compile(r'[^a-z0-9._-]+')
+
+
+def deployment_generation() -> str:
+    """Content-free deployment generation label for new telemetry records.
+
+    Bounded and character-restricted: anything outside ``[a-z0-9._-]`` collapses to ``-``
+    and the result is capped at 64 characters, so no host name, path, credential or
+    free-form text can reach a record through this key. An empty value resolves to
+    :data:`GENERATION_DEFAULT` rather than to an empty string.
+    """
+    value = str(raw('JEV_DEPLOYMENT_GENERATION', '') or '').strip().lower()
+    token = _GENERATION_RX.sub('-', value)[:GENERATION_MAX_LEN].strip('-')
+    return token or GENERATION_DEFAULT
+
+
 def allowed_platforms() -> tuple:
     """Gate 1: platforms whose human turns may be observed (``JEV_ALLOWED_PLATFORMS``).
 
@@ -164,7 +199,17 @@ def internal_markers() -> tuple:
 
 
 def skip_counter_path() -> pathlib.Path:
-    """Content-free rejection counters (see :mod:`router.skip_telemetry`)."""
+    """Content-free rejection counters (see :mod:`router.skip_telemetry`).
+
+    ``JEV_SKIP_COUNTER_PATH`` overrides the location verbatim, so a converged deployment
+    can keep appending to a counter file that already exists instead of starting a second,
+    empty series beside it. The writer stays atomic (read/modify/replace) and never
+    migrates or rewrites existing keys; only the *day bucket* of new writes uses the
+    canonical UTC date, so one migration boundary may split a single day across two keys.
+    """
+    override = str(raw('JEV_SKIP_COUNTER_PATH', '') or '').strip()
+    if override:
+        return pathlib.Path(os.path.expanduser(override))
     return LOG_DIR / 'skipped-turn-counters.json'
 
 

@@ -154,6 +154,10 @@ def _work(item: dict):
         'actual_model': item.get('actual_model'),
         'would_execute': would,
         'mode': item.get('mode') or 'shadow',
+        # Content-free migration label: which code generation produced this record. The
+        # key is absent from records written before it existed, and readers classify those
+        # as legacy rather than guessing (see tools/shadow_stats.py).
+        'deployment_generation': config.deployment_generation(),
         **_features(item),
     }
     with _lock:
@@ -219,7 +223,8 @@ def log_privacy_fallback(*, turn_id=None, actual_model=None, reason='unsafe_reda
            'input_tokens': None, 'output_tokens': None, 'success': True,
            'error': reason, 'actual_model': actual_model,
            # Nothing was routed at all, so no route may be presented as executable.
-           'would_execute': None, 'mode': 'shadow'}
+           'would_execute': None, 'mode': 'shadow',
+           'deployment_generation': config.deployment_generation()}
     with _lock:
         _stats['turns'] += 1
         _stats['privacy_fallback'] += 1

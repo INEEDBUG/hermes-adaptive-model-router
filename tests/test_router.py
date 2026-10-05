@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -195,6 +196,10 @@ chk('D9 fail-open attribution reaches the capable route',
     shadow.simulate(cases[3][0]) == 'mimo_pro')
 chk('D10 no hard-coded availability flag remains in the module',
     not hasattr(shadow, 'MIMO_AVAILABLE'))
+set_routes('mimo_pro, MIMO_PRO deepseek_flash')
+chk('D11 duplicate/odd-cased names collapse to one entry each',
+    config.available_routes() == ('mimo_pro', 'deepseek_flash'),
+    f'routes={config.available_routes()}')
 set_routes(None)
 
 print('=== E. fault injection: unreachable / bad credential / malformed ===')
@@ -273,7 +278,7 @@ else:
         rec = mine[0]
         allowed = {'timestamp', 'turn_id', 'jev_model', 'route', 'confidence', 'p_deepseek',
                    'p_mimo', 'latency_ms', 'input_tokens', 'output_tokens', 'success', 'error',
-                   'actual_model', 'would_execute', 'mode',
+                   'actual_model', 'would_execute', 'mode', 'deployment_generation',
                    'task_length', 'tool_use', 'shell', 'coding', 'debugging', 'research',
                    'long_context', 'destructive_action', 'production_change', 'redaction_count',
                    'dossier_token_estimate'}
@@ -282,6 +287,104 @@ else:
         chk('F6 route is a known choice', rec['route'] in {'deepseek_flash', 'mimo_pro'})
         chk('F7 prompt text absent from the log', 'Refactor the auth module' not in json.dumps(lines))
         print('     record:', json.dumps(rec, ensure_ascii=False))
+
+print('=== H. deployment generation metadata (migration support) ===')
+
+
+def set_gen(value):
+    if value is None:
+        os.environ.pop('JEV_DEPLOYMENT_GENERATION', None)
+    else:
+        os.environ['JEV_DEPLOYMENT_GENERATION'] = value
+    config._cache['at'] = 0
+    return config.deployment_generation()
+
+
+set_gen(None)
+chk('H1 unset -> stable canonical default', config.deployment_generation() == 'unversioned'
+    and config.GENERATION_DEFAULT == 'unversioned')
+set_gen('canonical-0.2.0')
+chk('H2 explicit value honoured', config.deployment_generation() == 'canonical-0.2.0')
+set_gen('Canonical 0.2.0 REHEARSAL')
+chk('H3 normalised to a bounded token', config.deployment_generation() == 'canonical-0.2.0-rehearsal',
+    f"got={config.deployment_generation()}")
+set_gen('x' * 200)
+chk('H4 length is bounded', len(config.deployment_generation()) <= config.GENERATION_MAX_LEN,
+    f"len={len(config.deployment_generation())}")
+set_gen('/opt/data/private/path name=secret value')
+_h5 = config.deployment_generation()
+chk('H5 paths/separators/credentials cannot survive', not any(c in _h5 for c in '/ =:'),
+    f"got={_h5}")
+set_gen('')
+chk('H6 empty value -> default, never empty string', config.deployment_generation() == 'unversioned')
+set_gen(None)
+
+print('=== I. rejection counters: legacy counter-file compatibility ===')
+from router import skip_telemetry  # noqa: E402
+
+_COUNTER_TMP = pathlib.Path(tempfile.mkdtemp(prefix='jev-counter-'))
+
+
+def set_counter(value):
+    if value is None:
+        os.environ.pop('JEV_SKIP_COUNTER_PATH', None)
+    else:
+        os.environ['JEV_SKIP_COUNTER_PATH'] = str(value)
+    config._cache['at'] = 0
+    return config.skip_counter_path()
+
+
+set_counter(None)
+chk('I1 default path keeps the canonical filename',
+    config.skip_counter_path().name == 'skipped-turn-counters.json',
+    f"path={config.skip_counter_path()}")
+
+_legacy = _COUNTER_TMP / 'skipped-non-user-turn.json'
+set_counter(_legacy)
+chk('I2 explicit override is used verbatim', config.skip_counter_path() == _legacy)
+
+# An existing legacy file: older day buckets must survive untouched, and the counts for a
+# key must keep increasing rather than restarting.
+_LEGACY_DAY = '2026-09-26'
+_LEGACY_KEY = 'feishu|background_review|origin_not_user'
+_legacy.write_text(json.dumps({
+    _LEGACY_DAY: {'date': _LEGACY_DAY,
+                  'counters': {_LEGACY_KEY: {'platform': 'feishu',
+                                             'turn_origin': 'background_review',
+                                             'reason': 'origin_not_user', 'count': 5}}}},
+    indent=1, sort_keys=True))
+_first = dict(skip_telemetry.bump('feishu', 'background_review', 'origin_not_user'))
+chk('I3 legacy bucket survives the first write', skip_telemetry.read()[_LEGACY_DAY]['counters']
+    [_LEGACY_KEY]['count'] == 5, f"data={skip_telemetry.read()}")
+skipped_telemetry_bump_ok = False
+for _ in range(3):
+    entry = dict(skip_telemetry.bump('feishu', 'background_review', 'origin_not_user'))
+# The legacy bucket keeps its own (local-day) key; new increments land in today's UTC
+# bucket, so the count to watch is the one inside the new bucket: 1 + 3 more bumps = 4.
+chk('I4 counter is monotonic, never reset', entry['count'] == 4, f"count={entry['count']}")
+_utc_day = time.strftime('%Y-%m-%d', time.gmtime())
+chk('I5 new writes use the canonical UTC day bucket',
+    _utc_day in skip_telemetry.read() and
+    skip_telemetry.read()[_LEGACY_DAY]['counters'][_LEGACY_KEY]['count'] == 5,
+    f"days={sorted(skip_telemetry.read())}")
+chk('I6 totals sum every bucket exactly once (no double counting)',
+    skip_telemetry.totals() == {'background_review': 9}, f"totals={skip_telemetry.totals()}")
+# Fail-safe: a corrupt file must not raise and must not lose the new counter.
+_legacy.write_text('{ this is not json')
+_bad = skip_telemetry.bump('feishu', 'subagent', 'origin_not_user')
+chk('I7 malformed file fails safe and recovers', _bad['count'] == 1
+    and skip_telemetry.totals().get('subagent') == 1, f"totals={skip_telemetry.totals()}")
+# Explicit path argument keeps working (the plugin never needs it, but tools do).
+_explicit = _COUNTER_TMP / 'explicit.json'
+skip_telemetry.bump('feishu', 'subagent', 'missing_origin', path=_explicit)
+chk('I8 explicit path argument still supported', _explicit.exists()
+    and skip_telemetry.totals(skip_telemetry.read(_explicit)) == {'subagent': 1})
+# An unknown reason collapses to 'other' and never reaches the file as free text.
+skip_telemetry.bump('feishu', 'subagent', 'something arbitrary and long', path=_explicit)
+chk('I9 unknown reasons collapse to the closed vocabulary',
+    skip_telemetry.totals(skip_telemetry.read(_explicit)) == {'subagent': 2}
+    and 'arbitrary' not in _explicit.read_text())
+set_counter(None)
 
 print('=== G. automatic switching is not implemented in this release ===')
 import importlib.util as _ilu  # noqa: E402

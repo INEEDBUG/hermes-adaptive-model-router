@@ -100,3 +100,24 @@ work, and it must proceed in this order:
 **A repository update must never auto-synchronise production.** Merging documentation,
 publishing evidence or repairing CI in this repository changes nothing about what a
 deployment runs; installation is a separate authorised act.
+
+## Migration mechanics that now exist in this repository
+
+Two mechanisms were added so that a convergence install can be rehearsed and then audited
+instead of guessed (details and the full runbook:
+[`offline-convergence-rehearsal.md`](offline-convergence-rehearsal.md)):
+
+* **Deployment generation.** New telemetry records carry a bounded, content-free
+  `deployment_generation` label (`JEV_DEPLOYMENT_GENERATION`, default `unversioned`).
+  Records written before the key existed are reported as `legacy_unversioned`, never
+  rewritten. Because `would_execute` means different things in the two generations, the
+  statistics tool withholds a merged figure when more than one generation is present and
+  reports per-generation figures instead (`--generation NAME` restricts the analysis).
+* **Counter-path override.** `JEV_SKIP_COUNTER_PATH` points the content-free rejection
+  counter writer at an existing counter file, so a rename does not orphan months of
+  counters. History is never copied, rewritten or re-dated; one migration boundary may split
+  a calendar day across two keys because the day basis changes from local to UTC.
+
+Neither mechanism changes behaviour on its own: with the key unset the label is the stable
+default, and with the path unset the canonical filename inside the log directory is used.
+

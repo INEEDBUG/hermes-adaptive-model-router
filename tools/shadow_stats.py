@@ -15,6 +15,7 @@ database is opened read-only.
 Usage::
 
     HERMES_HOME=/opt/data python3 tools/shadow_stats.py [--json]
+                                     [--group-by-generation] [--generation NAME]
 """
 from __future__ import annotations
 
@@ -32,6 +33,11 @@ DB = os.environ.get('HERMES_STATE_DB') or str(HERMES_HOME / 'state.db')
 REAL_SOURCES = {'feishu', 'lark', 'telegram', 'discord', 'slack', 'signal',
                 'whatsapp', 'imessage', 'api_server'}
 TEST_TURN_PREFIXES = ('OFFLINE-TEST', 'KILLTEST', 'MANUAL-TEST')
+
+# Mirrors router.config.GENERATION_LEGACY. Records written before the deployment
+# generation key existed carry no value and are reported under this label instead of being
+# silently merged into a later generation's figures.
+GENERATION_LEGACY = 'legacy_unversioned'
 
 
 def load_records() -> list:
@@ -123,7 +129,42 @@ def dossier_size_bucket(v) -> str:
     return '>=400'
 
 
-def build(recs: list, sources: dict) -> dict:
+def generation_of(rec: dict) -> str:
+    """Deployment generation of one record (content-free label written by the router).
+
+    A record without the key predates the migration metadata, so it is reported as
+    ``legacy_unversioned``: guessing a generation would silently mix policy semantics.
+    """
+    value = rec.get('deployment_generation')
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return GENERATION_LEGACY
+
+
+def _summarize(rows: list) -> dict:
+    """Per-generation figures. ``would_execute`` is only meaningful inside one generation:
+    the legacy deployment decided executability from a hard-coded route list, the canonical
+    line decides it from configured availability."""
+    ok = [r for r in rows if r.get('success')]
+    return {
+        'real_turns': len(rows),
+        'real_success': len(ok),
+        'routes': dict(Counter((r.get('route') or 'ERROR') for r in rows)),
+        'route_pct': ({k: round(100.0 * v / len(ok), 1)
+                       for k, v in Counter(r.get('route') for r in ok).items()} if ok else {}),
+        'would_execute': dict(Counter(str(r.get('would_execute')) for r in rows)),
+        'confidence_median': pct([float(r['confidence']) for r in ok
+                                  if isinstance(r.get('confidence'), (int, float))], 0.5),
+        'latency_p50': pct([int(r['latency_ms']) for r in rows
+                            if isinstance(r.get('latency_ms'), (int, float))], 0.5),
+    }
+
+
+def build(recs: list, sources: dict, generation: str | None = None) -> dict:
+    if generation:
+        # GROUP_BY_DEPLOYMENT_GENERATION: restrict the whole analysis to one generation so
+        # that routing-policy figures are never computed across migration boundaries.
+        recs = [r for r in recs if generation_of(r) == generation]
     buckets = defaultdict(list)
     for r in recs:
         buckets[classify(r, sources)].append(r)
@@ -150,7 +191,22 @@ def build(recs: list, sources: dict) -> dict:
             ctx_route[dossier_size_bucket(v)][r.get('route')] += 1
 
     errors = Counter(str(r.get('error')) for r in real if not r.get('success') and r.get('error'))
+    gens = sorted({generation_of(r) for r in real})
+    by_gen = {g: _summarize([r for r in real if generation_of(r) == g]) for g in gens}
+    mixed = len(gens) > 1
     return {
+        # Deployment-generation split. ``would_execute`` below is only populated when every
+        # real turn belongs to one generation; otherwise the caller must read the
+        # per-generation blocks, because legacy and canonical are different policies.
+        'generations': gens,
+        'mixed_generations': mixed,
+        'by_generation': by_gen,
+        'would_execute_by_generation': {g: by_gen[g]['would_execute'] for g in gens},
+        'would_execute': by_gen[gens[0]]['would_execute'] if len(gens) == 1 else None,
+        'would_execute_note': (
+            'single deployment generation' if len(gens) == 1 else
+            'mixed deployment generations: would_execute is not comparable across them, '
+            'read would_execute_by_generation (use --generation NAME for one policy)'),
         'real_turns': len(real),
         'real_success': len(ok),
         'routes': dict(routes),
@@ -196,6 +252,19 @@ def render(s: dict) -> str:
     L.append(f"latency: n={la['n']} mean={la['mean']} p50={la['p50']} p95={la['p95']} max={la['max']}")
     L.append(f"timeout/error: {s['error_count']} {s['errors']}  |  privacy fallback: {s['privacy_fallback']}")
     L.append('')
+    L.append(f"deployment generations (real turns): {s['generations']}")
+    if s['mixed_generations']:
+        L.append('  WARNING: more than one deployment generation is present. would_execute /')
+        L.append('  routing-policy figures are NOT comparable across generations and are')
+        L.append('  therefore reported per generation; the mixed raw totals above are counts')
+        L.append('  only and must not be quoted as a canonical routing figure.')
+    for g, b in s['by_generation'].items():
+        L.append(f"  [{g}] real={b['real_turns']} success={b['real_success']} "
+                 f"routes={b['routes']} would_execute={b['would_execute']} "
+                 f"conf_median={b['confidence_median']} latency_p50={b['latency_p50']}")
+    if not s['mixed_generations']:
+        L.append(f"  would_execute (single generation): {s['would_execute']}")
+    L.append('')
     L.append('task category x route:')
     for k, v in s['category_route'].items():
         if v:
@@ -212,7 +281,17 @@ def render(s: dict) -> str:
 def main() -> int:
     recs = load_records()
     src = session_sources()
-    s = build(recs, src)
+    generation = None
+    if '--generation' in sys.argv:
+        i = sys.argv.index('--generation')
+        if i + 1 < len(sys.argv):
+            generation = sys.argv[i + 1]
+        else:
+            print('--generation needs a value', file=sys.stderr)
+            return 2
+    # Per-generation grouping is always computed, so --group-by-generation is accepted as
+    # an explicit statement of intent rather than a switch that changes the maths.
+    s = build(recs, src, generation=generation)
     if '--json' in sys.argv:
         print(json.dumps(s, ensure_ascii=False, indent=2))
     else:
