@@ -495,13 +495,19 @@ def main(argv=None) -> int:
 
     payload = json.dumps(out, indent=2, sort_keys=True, default=str)
     if args.json:
+        # The rule states the hazard instead of banning a whole directory tree: never write inside
+        # the telemetry or log directory, never touch the state database or the plugin tree, and
+        # never overwrite a file that already exists. A fresh aggregate under the caller's own
+        # report directory is theirs to place.
         dest = pathlib.Path(args.json).resolve()
-        forbidden = [pathlib.Path(args.log_dir).resolve(), pathlib.Path(args.state_db).resolve().parent,
-                     pathlib.Path(os.environ.get("HERMES_HOME") or "/opt/data").resolve()]
-        for f in forbidden:
-            if f == dest or f in dest.parents:
-                print(f"refusing to write inside the deployment: {dest}", file=sys.stderr)
-                return 4
+        home = pathlib.Path(os.environ.get("HERMES_HOME") or "/opt/data").resolve()
+        forbidden = [pathlib.Path(args.log_dir).resolve(), home / "logs", home / "plugins",
+                     pathlib.Path(args.state_db).resolve()]
+        inside = [f for f in forbidden[:3] if f == dest or f in dest.parents]
+        if inside or dest == forbidden[3] or dest.exists():
+            reason = "inside the deployment" if inside or dest == forbidden[3] else "would overwrite an existing file"
+            print(f"refusing to write {reason}: {dest}", file=sys.stderr)
+            return 4
         dest.write_text(payload + "\n")
         print(f"aggregate written to {dest}")
     else:

@@ -276,12 +276,27 @@ def main():
         and fingerprint(sentinel / 'db') == before['db'])
 
     # ---------------- F: refuses to write inside a deployment ----------------
-    dest = sentinel / 'logs' / 'aggregate.json'
+    dest = logs / 'aggregate.json'
     refused = run_tool(env, TOOL, '--generation', 'all', '--log-dir', str(logs),
                        '--state-db', str(state_db), '--json', str(dest))
     chk('F1 refuses to write an aggregate inside a deployment', refused.returncode == 4,
         f'rc={refused.returncode}')
     chk('F2 no aggregate file was created', not dest.exists())
+    home_dest = tmp / 'logs' / 'aggregate.json'
+    refused_home = run_tool(env, TOOL, '--generation', 'all', '--log-dir', str(logs),
+                            '--state-db', str(state_db), '--json', str(home_dest))
+    chk('F2a refuses to write into the deployment log directory',
+        refused_home.returncode == 4 and not home_dest.exists(), f'rc={refused_home.returncode}')
+    refused_db = run_tool(env, TOOL, '--generation', 'all', '--log-dir', str(logs),
+                          '--state-db', str(sentinel / 'db' / 'state.db'),
+                          '--json', str(sentinel / 'db' / 'state.db'))
+    chk('F2b refuses to write onto the state database', refused_db.returncode == 4,
+        f'rc={refused_db.returncode}')
+    existing = sentinel / 'state' / 'session.json'
+    refused_overwrite = run_tool(env, TOOL, '--generation', 'all', '--log-dir', str(logs),
+                                 '--state-db', str(state_db), '--json', str(existing))
+    chk('F2c refuses to overwrite any existing file', refused_overwrite.returncode == 4
+        and existing.read_text() == '{"sentinel": true}\n', f'rc={refused_overwrite.returncode}')
     outside = pathlib.Path(tempfile.mkdtemp(prefix='jev-outcome-out-'))
     ok_dest = outside / 'aggregate.json'
     wrote = run_tool(env, TOOL, '--generation', 'all', '--log-dir', str(logs),

@@ -234,8 +234,11 @@ python3 tools/routing_quality.py --generation canonical-dff8b11 --outcome-aggreg
 ```
 
 `tools/outcome_signals.py` is read-only, offline, generation-aware, refuses to replicate a session
-aggregate onto sibling turns, refuses to write inside a deployment, emits no turn or session
-identifier, and reports `attribution_quality` with every value it exposes.
+aggregate onto sibling turns, emits no turn or session identifier, and reports `attribution_quality`
+with every value it exposes. Its write rule names the hazard rather than banning a directory tree:
+it will not write inside the telemetry/log directory in use, or inside the deployment's `logs/` tree,
+or onto the state database or the plugin tree, and it will not overwrite a file that already exists.
+A fresh aggregate under the caller's own report directory is theirs to place.
 
 The routing-quality integration is optional: without `--outcome-aggregate` the tool's output is
 byte-for-byte what it was before. With it, the extra view carries `CORRELATION_NOT_CAUSATION = YES`
