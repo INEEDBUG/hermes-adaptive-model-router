@@ -66,6 +66,42 @@ chk('A8 mixed patterns counted exactly', _m8['hits'] == 3 and _m8['kinds'] == {'
 _o9, _m9 = redact.redact('nothing sensitive in this sentence at all')
 chk('A9 clean text yields zero hits', _m9['hits'] == 0 and not _m9['kinds'],
     f"hits={_m9['hits']}")
+# A10-A16: regression — every label alternation must treat whitespace as a separator.
+# The separator class was written with a raw-string double escape (``\\s``), which the
+# regex engine reads as *backslash or the letter s*, so "api key=<value>" and
+# "api<TAB>key=<value>" were not redacted even though api-key / api_key / apikey were.
+# The value used below is synthetic and assembled at runtime, so this file never embeds
+# a key-shaped literal that a scanner would have to reason about.
+_V = 'synthetic' + '-value-1234'
+
+
+def _red(probe):
+    return redact.redact(probe)[0]
+
+
+_o10 = _red(f'api key={_V}')
+chk('A10 api<space>key= redacted', _V not in _o10, f"out={_o10!r}")
+_o11 = _red(f'api\tkey={_V}')
+chk('A11 api<TAB>key= redacted', _V not in _o11, f"out={_o11!r}")
+_o12 = [_red(f'api{sep}key={_V}') for sep in ('-', '_', '')]
+chk('A12 api-key= / api_key= / apikey= redacted', all(_V not in x for x in _o12),
+    f"missed={[i for i, x in enumerate(_o12) if _V in x]}")
+_o13 = [_red(f'{label}={_V}') for label in ('access token', 'refresh token', 'auth token',
+                                           'access_token', 'token', 'client secret',
+                                           'password', 'secret', 'credential')]
+chk('A13 access/refresh/auth token, token, client secret, password, secret unchanged',
+    all(_V not in x for x in _o13), f"missed={[i for i, x in enumerate(_o13) if _V in x]}")
+# Negative controls. The separator set is exactly {_, -, whitespace, none}: a letter that
+# merely resembles an escape must not act as one, and ordinary prose stays untouched.
+_o14 = _red('the api sketch key api sketch')
+chk('A14 ordinary prose stays untouched', _o14 == 'the api sketch key api sketch',
+    f"out={_o14!r}")
+_o15 = _red(f'apizkey={_V}')
+chk('A15 a letter is not a separator', _V in _o15, f"out={_o15!r}")
+_o16 = redact.redact(f'api key={_V} mail a.b@example.com host 192.0.2.10')[1]
+chk('A16 whitespace form counted once, kinds exact',
+    _o16['hits'] == 3 and _o16['kinds'] == {'kv_secret', 'email', 'ipv4'},
+    f"hits={_o16['hits']} kinds={sorted(_o16['kinds'])}")
 
 print('=== B. routing dossier (current turn only) ===')
 d, m = dossier.build('Please refactor the auth module across three files and debug the failing test.')

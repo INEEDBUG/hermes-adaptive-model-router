@@ -14,8 +14,8 @@ PATTERNS = [
     ('api_key', re.compile(r'\bapikey_[A-Za-z0-9_]{16,}\b', re.I)),
     ('bearer', re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._\-]{12,}')),
     ('kv_secret', re.compile(
-        r'(?i)\b(api[_\-\\s]?key|access[_\-\\s]?token|refresh[_\-\\s]?token|auth[_\-\\s]?token|token|'
-        r'password|passwd|pwd|secret|client[_\-\\s]?secret|credential)\b\s*[:=]\s*["\']?([^\s"\',;]{4,})')),
+        r'(?i)\b(api[_\-\s]?key|access[_\-\s]?token|refresh[_\-\s]?token|auth[_\-\s]?token|token|'
+        r'password|passwd|pwd|secret|client[_\-\s]?secret|credential)\b\s*[:=]\s*["\']?([^\s"\',;]{4,})')),
     ('email', re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')),
     ('ipv4', re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')),
     ('ipv6', re.compile(r'\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b')),
