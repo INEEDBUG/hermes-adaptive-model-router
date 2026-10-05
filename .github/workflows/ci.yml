@@ -49,6 +49,12 @@ jobs:
       - name: installer tests (fake hermes CLI, throwaway HERMES_HOME)
         run: bash tests/test_installer.sh
 
+      # The convergence rehearsal is the acceptance test for a future install: it fails if
+      # telemetry continuity, the human-turn boundary, redaction or the route-availability
+      # contract regresses, and it never calls an external service.
+      - name: convergence rehearsal (generation metadata, boundary, redaction, dossier)
+        run: python3 tests/test_convergence_rehearsal.py
+
       - name: state initialiser (dry run)
         run: python3 tools/init_state.py --dry-run
 

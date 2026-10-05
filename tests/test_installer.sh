@@ -200,6 +200,35 @@ PATH="$BIN:$PATH" HERMES_HOME="$HOME_F" JEV_STATE_DIR="$STATE_G" \
 chk "F8 a fresh state directory is still initialised (mode=shadow)" \
   "$([ -f "$STATE_G/mode.json" ] && grep -q '"shadow"' "$STATE_G/mode.json" && echo 0 || echo 1)"
 
+echo "=== G. the installer can never enable auto, and installs exactly one plugin ==="
+# `auto` is not implemented in this release: the installer may only ever record shadow or
+# off, and it must refuse the request rather than write a state file that claims otherwise.
+HOME_H="$(new_home h)"
+STATE_H="$TMP/state-h"; mkdir -p "$STATE_H"
+rm -f "$CALLS" "$SET_LOG"
+PATH="$BIN:$PATH" HERMES_HOME="$HOME_H" JEV_STATE_DIR="$STATE_H" \
+  bash "$INSTALLER" --hermes-home "$HOME_H" --state-mode auto > "$TMP/out-h1.txt" 2>&1
+RC_H1=$?
+chk "G1 --state-mode auto is refused (non-zero exit)" "$([ "$RC_H1" != 0 ] && echo 0 || echo 1)"
+chk "G2 the refused run writes no state file at all" \
+  "$([ ! -e "$STATE_H/mode.json" ] && echo 0 || echo 1)"
+chk "G3 the refused run leaves no auto string behind" \
+  "$(! grep -q 'auto' "$HOME_H/.env" 2>/dev/null && ! grep -q 'auto' "$HOME_H/config.yaml" 2>/dev/null && echo 0 || echo 1)"
+
+PATH="$BIN:$PATH" HERMES_HOME="$HOME_H" JEV_STATE_DIR="$STATE_H" \
+  bash "$INSTALLER" --hermes-home "$HOME_H" > "$TMP/out-h2.txt" 2>&1
+chk "G4 a normal install records shadow, never auto" \
+  "$(grep -q '\"mode\": \"shadow\"' "$STATE_H/mode.json" && ! grep -q 'auto' "$STATE_H/mode.json" && echo 0 || echo 1)"
+chk "G5 no auto-approval flag is ever written" \
+  "$(! grep -q 'JEV_AUTO_APPROVED' "$HOME_H/.env" && echo 0 || echo 1)"
+chk "G6 exactly one plugin directory is installed (no duplicate hook)" \
+  "$([ "$(find "$HOME_H/plugins" -maxdepth 1 -name 'jev-shadow-router' | wc -l)" = 1 ] && echo 0 || echo 1)"
+chk "G7 the installed plugin files are readable and not world-writable" \
+  "$([ -r "$HOME_H/plugins/jev-shadow-router/__init__.py" ] \
+     && [ -z "$(find "$HOME_H/plugins/jev-shadow-router" -perm -o+w)" ] && echo 0 || echo 1)"
+chk "G8 the state file is not world-writable" \
+  "$([ -z "$(find "$STATE_H/mode.json" -perm -o+w)" ] && echo 0 || echo 1)"
+
 echo
 echo "total $((PASS + FAIL)) checks, failed $FAIL"
 [ "$FAIL" = 0 ] || exit 1
