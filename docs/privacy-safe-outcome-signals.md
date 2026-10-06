@@ -412,3 +412,114 @@ RESTART_REQUIRED    = YES — a plugin hook-registration change only takes effec
 ```
 
 Nothing in this section authorises enabling Auto, and nothing here is deployed.
+
+## Hardening pass (deployment review)
+
+The first implementation carried four correctness defects that only bite a *future* deployment.
+They were fixed in the repository; the semantics below are the ones the record means from now on.
+
+### 1. Request identity — read from the source, not assumed
+
+``agent/conversation_loop.py`` assigns the id once per outer-loop iteration, *before* the retry
+loop::
+
+    s.api_request_id = agent._current_api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
+
+``_run_api_retry_loop`` (``while retry_count < max_retries``) never reassigns it, while
+``build_api_request`` fires ``pre_api_request`` on every pass. So::
+
+    API_REQUEST_ID_SCOPE        = LOGICAL_CALL
+    RETRY_REUSES_API_REQUEST_ID = YES
+    PHYSICAL_ATTEMPT_IDENTITY   = (api_request_id, retry_count)   # observable on pre / error only
+
+Two namespaces are therefore kept apart, which is what stops an error hook from swallowing the
+success that follows it::
+
+    attempt namespace  (api_request_id, retry_count)     shared by pre_api_request / api_request_error
+    response namespace (api_request_id, api_call_count)  post_api_request
+
+### 2. Counting model and the "never silently false" rule
+
+```
+api_logical_call_count = distinct api_request_id
+api_request_count      = distinct attempts observed (+ a success whose attempt hook was unseen)
+api_error_count        = distinct failed attempts
+api_success_count      = distinct successful responses
+retry_count_observed   = attempts observed with retry_count > 0
+```
+
+``DUPLICATE_HOOK_POLICY = SUPPRESS_DUPLICATE_AND_DEGRADE`` and
+``REQUEST_DEDUP_SATURATION_POLICY = SATURATE_THEN_DEGRADE``: a repeated key inside one namespace is
+suppressed, and past capacity the key sets stop growing. **Both paths degrade the turn** to
+``PARTIAL_PROSPECTIVE``, so a suppressed or unprovable count can never be presented as exact::
+
+    EXACTNESS_NEVER_SILENTLY_FALSE = YES
+
+A cross-namespace or cross-kind sighting of the *same* attempt (pre then error) is expected: it is
+neither double counted nor degraded. Verified by a 512-attempt saturation fixture plus duplicate
+hooks after saturation, and by an error → retry → success fixture where all four counters stay exact.
+
+### 3. Outcome cohort equals the routing-attempt cohort
+
+```
+OUTCOME_COHORT_CONTRACT = one accumulator == one turn that reached an actual canonical routing
+                          observation attempt (outcome_scope = 'routing_attempt')
+```
+
+The accumulator opens only after the human-provenance gate, a structurally usable message, the
+internal marker invariant, a built dossier and the privacy decision — and immediately before
+``shadow.submit``. A turn that stops earlier (empty message, marker violation, privacy fallback)
+has **no outcome record at all**, so it can never be an unmatched outcome dragging a denominator
+down. The analyzer reports three separate numbers instead of one mixed one::
+
+    ADMITTED_SHADOW_TURNS           shadow observations of the generation that reached a routing attempt
+    MATCHED_TERMINAL_OUTCOMES       records whose correlation hashes back to such a turn
+    MISSING_TERMINAL_OUTCOMES       ADMITTED_SHADOW_TURNS - matched        (never success)
+    UNMATCHED_TERMINAL_OUTCOMES     records matching no admitted turn, shown explicitly, never pooled
+
+``TERMINAL_COVERAGE_FORMULA = MATCHED_TERMINAL_OUTCOMES / ADMITTED_SHADOW_TURNS`` — ``len(all rows)``
+is never used as the matched count.
+
+### 4. Duration, switches, quality and the day partition
+
+```
+DURATION_SEMANTIC   = observed_execution_duration_ms
+                      accumulator open (post-admission, pre-submission) -> observed terminal hook;
+                      never user-perceived latency, never the full arrival->response wall time,
+                      never model latency
+MODEL_SWITCH_COUNT  = TRANSITION count: increments exactly when the newly observed model differs
+                      from actual_model_last; models_seen is only a bounded unique inventory and
+                      never decides the count (A->B->A is 2, not 1), and the terminal hook passes
+                      through the same logic instead of overwriting actual_model_last
+ATTRIBUTION_QUALITY = closed enum [EXACT_PROSPECTIVE, PARTIAL_PROSPECTIVE]; reasons are a closed
+                      enum [duplicate_hook_event, request_identity_saturated] — no free-form string
+OUTCOME_DAY_PARTITION = UTC (time.gmtime(); independent of the process timezone)
+```
+
+Analyzer guarantees: exact and partially attributed turns are reported separately and never pooled
+into one number; the parser rejects (rather than coerces) an unknown schema, an unexpected field, an
+invalid terminal status, an invalid attribution quality, a non-enum degradation reason, a malformed
+numeric or a wrong type, and prints **counts by closed reason only** — never the offending value.
+
+### 5. Pre-deployment gates in the repository
+
+```
+tools/check_outcome_hook_contract.py   source-compatibility gate (exit 3 = fail closed):
+                                       required hooks present, load-bearing payload fields present,
+                                       OPTIONAL vs REQUIRED distinguished, manifest hooks ==
+                                       register(ctx), version of record consistent.
+                                       LIVE_REQUEST = NO, CREDENTIALS_USED = NO, and it is explicitly
+                                       NOT a runtime validation.
+tests/test_hook_contract.py            proves the gate passes on a complete fixture tree, fails on a
+                                       dropped hook or a dropped load-bearing field, and passes on
+                                       the installed Hermes source when one is present
+tests/test_deployment_rehearsal.py     exports the candidate (git archive HEAD, plus a worktree
+                                       overlay while uncommitted), loads it in a fresh process through
+                                       a fake hook registry, isolated JEV_LOG_DIR and shadow state,
+                                       with sockets blocked: 5 hooks register, the routing observation
+                                       is unchanged, one schema-valid record is appended, mode stays
+                                       shadow, Auto never enabled, and nothing is installed
+```
+
+Version of record: ``plugin/plugin.yaml`` and ``router/__init__.py`` carry the same number, asserted
+by the gate and the suite. No release tag is created, because no release policy exists.

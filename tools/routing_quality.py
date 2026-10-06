@@ -436,16 +436,21 @@ def outcome_correlation(path: pathlib.Path, cohort_out: dict, generation: str) -
         "single_turn_session_subset": structure.get("SINGLE_TURN_SESSION_SUBSET"),
         # Structural outcome features, when a future deployment has recorded them. These are
         # request counts, durations and token buckets per turn — never a verdict about routing.
+        # Exact and partially attributed turns are never merged into one number.
         "prospective_structural_outcomes": {
             "available": bool(prospective_gen),
             "terminal_coverage": {k: prospective_gen.get(k) for k in
                                   ("ADMITTED_SHADOW_TURNS", "TERMINAL_OUTCOMES",
-                                   "MISSING_TERMINAL_OUTCOMES", "MISSING_TERMINAL_IS_SUCCESS")},
-            "terminal_status_distribution": prospective_gen.get("terminal_status_distribution"),
-            "request_count": prospective_gen.get("api_request_count"),
-            "duration_ms": prospective_gen.get("duration_ms"),
-            "cache_write_observed_turns": prospective_gen.get("api_cache_write_observed_turns"),
-            "note": "structural execution facts only; they cannot rank two models",
+                                   "MATCHED_TERMINAL_OUTCOMES", "MISSING_TERMINAL_OUTCOMES",
+                                   "UNMATCHED_TERMINAL_OUTCOMES", "MISSING_TERMINAL_IS_SUCCESS")},
+            "matched_count_is_never_len_all_rows": "YES",
+            "duration_semantic": prospective_gen.get("DURATION_SEMANTIC"),
+            "structural_metrics_by_attribution_quality":
+                prospective_gen.get("metrics_by_attribution_quality"),
+            "exact_and_partial_mixing_forbidden":
+                prospective_gen.get("EXACT_AND_PARTIAL_MIXING_FORBIDDEN"),
+            "note": "structural execution facts only; they cannot rank two models, and a "
+                    "PARTIAL_PROSPECTIVE turn may never be pooled with an EXACT one",
         },
         "selection_bias": "the single-turn session subset is biased and exploratory only",
         "what_this_cannot_say": [

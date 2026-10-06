@@ -54,8 +54,12 @@ RESPONSE_SENTINEL = 'SECRET_RESPONSE_SENTINEL'
 TOOL_ARGS_SENTINEL = 'SECRET_TOOL_ARGS_SENTINEL'
 TOOL_RESULT_SENTINEL = 'SECRET_TOOL_RESULT_SENTINEL'
 ERROR_MESSAGE_SENTINEL = 'SECRET_ERROR_MESSAGE_SENTINEL'
+# A content-bearing fake *session* value. The structural session_id used by the fixtures stays an
+# independent, non-secret label ('fx-J', ...), so this proves that a session-looking value cannot
+# reach telemetry through any content field while the structural join key still works.
+SESSION_SENTINEL = 'SECRET_SESSION_SENTINEL'
 ALL_SENTINELS = (PROMPT_SENTINEL, RESPONSE_SENTINEL, TOOL_ARGS_SENTINEL, TOOL_RESULT_SENTINEL,
-                 ERROR_MESSAGE_SENTINEL)
+                 ERROR_MESSAGE_SENTINEL, SESSION_SENTINEL)
 
 
 def chk(name, cond, extra=''):
@@ -95,7 +99,7 @@ def pre(turn_id, session, *, api_request_id='r1', api_call_count=1, retry_count=
           'tool_count': 12, 'approx_input_tokens': 2048, 'request_char_count': 8192,
           'max_tokens': 4096, 'started_at': time.time()}
     if content:
-        kw.update({'user_message': PROMPT_SENTINEL,
+        kw.update({'user_message': PROMPT_SENTINEL, 'session_title': SESSION_SENTINEL,
                    'conversation_history': [{'role': 'user', 'content': PROMPT_SENTINEL}],
                    'request_messages': [{'role': 'tool', 'content': TOOL_RESULT_SENTINEL}],
                    'system_prompt': PROMPT_SENTINEL,
@@ -118,7 +122,8 @@ def post(turn_id, session, *, api_request_id='r1', api_call_count=1, input_token
                     'total_tokens': input_tokens + cache_read + cache_write + output_tokens},
           'assistant_content_chars': 1200, 'assistant_tool_call_count': 0}
     if content:
-        kw.update({'response': {'assistant_message': {'role': 'assistant',
+        kw.update({'session_title': SESSION_SENTINEL,
+                   'response': {'assistant_message': {'role': 'assistant',
                                                       'content': RESPONSE_SENTINEL,
                                                       'tool_calls': [{'args': TOOL_ARGS_SENTINEL}]}},
                    'assistant_message': type('M', (), {'content': RESPONSE_SENTINEL,
@@ -132,6 +137,7 @@ def err(turn_id, session, *, api_request_id='r1', retry_count=1, duration=0.2,
           'session_id': session, 'platform': platform, 'model': 'deepseek-flash',
           'api_call_count': 1, 'api_duration': duration, 'retry_count': retry_count,
           'max_retries': 3, 'retryable': True, 'status_code': 429, 'reason': 'rate_limit',
+          'session_title': SESSION_SENTINEL,
           'error': {'type': 'RateLimitError', 'message': ERROR_MESSAGE_SENTINEL},
           'request': {'method': 'POST', 'body': {'content': PROMPT_SENTINEL}}}
     return kw
@@ -142,6 +148,7 @@ def final(turn_id, session, *, model='deepseek-flash', platform='feishu', conten
           'platform': platform}
     if content:
         kw.update({'user_message': PROMPT_SENTINEL, 'assistant_response': RESPONSE_SENTINEL,
+                   'session_title': SESSION_SENTINEL,
                    'conversation_history': [{'role': 'tool', 'content': TOOL_RESULT_SENTINEL}]})
     return kw
 
@@ -246,6 +253,7 @@ def main():
     plugin._on_post_api_request(**post('fx-A:1', 'fx-A', api_request_id='r1', input_tokens=1000,
                                        output_tokens=100, cache_read=800, cache_write=0,
                                        duration=1.0, finish_reason='tool_calls'))
+    plugin._on_pre_api_request(**pre('fx-A:1', 'fx-A', api_request_id='r2', api_call_count=2))
     plugin._on_post_api_request(**post('fx-A:1', 'fx-A', api_request_id='r2', api_call_count=2,
                                        input_tokens=1200, output_tokens=150, cache_read=1000,
                                        cache_write=200, duration=1.5, finish_reason='stop'))
@@ -282,21 +290,39 @@ def main():
     chk('A19 the routing observation and the accumulator share one admission',
         SUBMITS == [('feishu', 'user')], json.dumps(SUBMITS))
 
-    # ---------------- B: error, retry, then success ----------------
+    # ---------------- B: error attempt -> retry -> success (real identity semantics) --------
+    # Hermes keeps ONE api_request_id for a logical call and increments retry_count per attempt:
+    # conversation_loop.py assigns f"{turn_id}:api:{api_call_count}" before _run_api_retry_loop and
+    # the retry loop never reassigns it, while build_api_request fires pre_api_request per attempt.
+    # So the failed attempt and the successful retry share an id but not an attempt key, and the
+    # error hook must never swallow the success hook.
     reset()
-    plugin._on_pre_api_request(**pre('fx-B:1', 'fx-B'))
-    plugin._on_api_request_error(**err('fx-B:1', 'fx-B', api_request_id='r1'))
-    plugin._on_post_api_request(**post('fx-B:1', 'fx-B', api_request_id='r2', api_call_count=2,
+    plugin._on_pre_api_request(**pre('fx-B:1', 'fx-B', api_request_id='r1', retry_count=0))
+    plugin._on_api_request_error(**err('fx-B:1', 'fx-B', api_request_id='r1', retry_count=0))
+    plugin._on_pre_api_request(**pre('fx-B:1', 'fx-B', api_request_id='r1', retry_count=1))
+    plugin._on_post_api_request(**post('fx-B:1', 'fx-B', api_request_id='r1', api_call_count=1,
                                        input_tokens=500, output_tokens=50, cache_read=0, cache_write=0))
     plugin._on_post_llm_call(**final('fx-B:1', 'fx-B'))
     b = by_corr('fx-B:1')
     chk('B1 completed after a retry', len(b) == 1 and b[0]['terminal_status'] == 'completed')
     if b:
         chk('B2 error count preserved', b[0]['api_error_count'] == 1, str(b[0]['api_error_count']))
-        chk('B3 success count preserved', b[0]['api_success_count'] == 1)
-        chk('B4 retry observed', b[0]['retry_count_observed'] == 1)
+        chk('B3 success count preserved', b[0]['api_success_count'] == 1,
+            str(b[0]['api_success_count']))
+        chk('B4 retry observed', b[0]['retry_count_observed'] == 1,
+            str(b[0]['retry_count_observed']))
         chk('B5 runtime error flag', b[0]['runtime_error_observed'] is True)
-        chk('B6 request count spans both attempts', b[0]['api_request_count'] == 2)
+        chk('B6 request count spans both attempts of the one logical call',
+            b[0]['api_request_count'] == 2, str(b[0]['api_request_count']))
+        chk('B7 the retry did not create a second logical call',
+            b[0]['api_logical_call_count'] == 1, str(b[0]['api_logical_call_count']))
+        chk('B8 attempts equal successes plus errors (ERROR_RETRY_ACCOUNTING_EXACT)',
+            b[0]['api_request_count'] == b[0]['api_success_count'] + b[0]['api_error_count'])
+        chk('B9 usage belongs to the successful attempt only',
+            b[0]['api_input_tokens_sum'] == 500 and b[0]['api_output_tokens_sum'] == 50)
+        chk('B10 the shared logical id did not degrade the turn', 
+            b[0]['attribution_quality'] == 'EXACT_PROSPECTIVE'
+            and b[0]['request_identity_saturated'] is False, json.dumps(b[0]['attribution_quality_reasons']))
 
     # ---------------- C: an error alone never fabricates a terminal ----------------
     reset()
@@ -344,9 +370,14 @@ def main():
                                            output_tokens=10, cache_read=0, cache_write=0))
     plugin._on_post_llm_call(**final('fx-F:1', 'fx-F'))
     f = by_corr('fx-F:1')
-    chk('F1 a duplicated request id is counted once',
-        len(f) == 1 and f[0]['api_request_count'] == 1, str(f[0]['api_request_count'] if f else None))
+    chk('F1 a duplicated response event is counted once',
+        len(f) == 1 and f[0]['api_request_count'] == 1 and f[0]['api_success_count'] == 1,
+        json.dumps([f[0]['api_request_count'], f[0]['api_success_count']] if f else None))
     chk('F2 duplicate suppression is visible', outcome.stats()['duplicate_request'] == 2)
+    chk('F3 a suppressed event degrades the turn instead of claiming EXACT',
+        f and f[0]['attribution_quality'] == 'PARTIAL_PROSPECTIVE'
+        and 'duplicate_hook_event' in f[0]['attribution_quality_reasons'],
+        json.dumps(f[0]['attribution_quality_reasons'] if f else None))
 
     # ---------------- G: late hook after finalization ----------------
     reset()
@@ -360,12 +391,13 @@ def main():
 
     # ---------------- H: two simultaneous turns in one session ----------------
     reset()
-    plugin._on_pre_api_request(**pre('fx-H:1', 'fx-H'))
-    plugin._on_pre_api_request(**pre('fx-H:2', 'fx-H'))
+    plugin._on_pre_api_request(**pre('fx-H:1', 'fx-H', api_request_id='h1r1'))
+    plugin._on_pre_api_request(**pre('fx-H:2', 'fx-H', api_request_id='h2r1'))
     plugin._on_post_api_request(**post('fx-H:1', 'fx-H', api_request_id='h1r1', input_tokens=1000,
                                        output_tokens=100, cache_read=0, cache_write=0))
     plugin._on_post_api_request(**post('fx-H:2', 'fx-H', api_request_id='h2r1', input_tokens=700,
                                        output_tokens=70, cache_read=0, cache_write=0))
+    plugin._on_pre_api_request(**pre('fx-H:1', 'fx-H', api_request_id='h1r2', api_call_count=2))
     plugin._on_post_api_request(**post('fx-H:1', 'fx-H', api_request_id='h1r2', api_call_count=2,
                                        input_tokens=200, output_tokens=20, cache_read=0, cache_write=0))
     plugin._on_post_llm_call(**final('fx-H:2', 'fx-H'))
@@ -547,20 +579,29 @@ def main():
                                  'deployment_generation': sh_sha}))
     (shadow_dir / 'shadow-2026-10-06.jsonl').write_text('\n'.join(lines) + '\n')
 
-    def ledger(digest, status='completed', **extra):
-        rec = {'schema_version': 'turn-outcome-v1', 'deployment_generation': GEN,
-               'platform': 'feishu', 'turn_origin': 'user', 'turn_correlation': digest,
-               'actual_model_first': 'deepseek-flash', 'actual_model_last': 'deepseek-flash',
-               'model_switch_count': 0, 'terminal_status': status, 'duration_ms': 1234,
-               'api_request_count': 2, 'api_success_count': 2, 'api_error_count': 0,
-               'retry_count_observed': 0, 'api_input_tokens_sum': 2200, 'api_output_tokens_sum': 250,
-               'api_cache_read_tokens_sum': 1800, 'api_cache_write_tokens_sum': 200,
-               'api_input_tokens_max_request': 1200, 'api_output_tokens_max_request': 150,
-               'api_cache_read_tokens_max_request': 1000, 'api_cache_write_tokens_max_request': 200,
-               'api_prompt_tokens_max_request': 2400, 'api_duration_ms_sum': 2500,
-               'api_duration_ms_max': 1500, 'runtime_error_observed': False,
-               'interrupted_observed': status == 'interrupted',
-               'attribution_quality': 'EXACT_PROSPECTIVE'}
+    def ledger(digest, status='completed', generation=GEN, platform='feishu', origin='user', **extra):
+        """A schema-valid record built from the canonical key set (never a hand-kept copy)."""
+        ints = {k: 0 for k in outcome._INT_FIELDS}
+        ints.update({'models_seen_count': 1, 'model_switch_count': 0, 'duration_ms': 1234,
+                     'api_logical_call_count': 2, 'api_request_count': 2, 'api_success_count': 2,
+                     'retry_count_observed': 0, 'api_input_tokens_sum': 2200,
+                     'api_output_tokens_sum': 250, 'api_cache_read_tokens_sum': 1800,
+                     'api_cache_write_tokens_sum': 200, 'api_input_tokens_max_request': 1200,
+                     'api_output_tokens_max_request': 150, 'api_cache_read_tokens_max_request': 1000,
+                     'api_cache_write_tokens_max_request': 200, 'api_prompt_tokens_max_request': 2400,
+                     'api_duration_ms_sum': 2500, 'api_duration_ms_max': 1500})
+        rec = dict(ints)
+        rec.update({'schema_version': 'turn-outcome-v1', 'outcome_scope': 'routing_attempt',
+                    'deployment_generation': generation, 'platform': platform, 'turn_origin': origin,
+                    'turn_correlation': digest, 'actual_model_first': 'deepseek-flash',
+                    'actual_model_last': 'deepseek-flash', 'terminal_status': status,
+                    'duration_semantics': outcome.DURATION_SEMANTIC,
+                    'finish_reason_last': 'stop', 'runtime_error_observed': False,
+                    'interrupted_observed': status == 'interrupted',
+                    'request_identity_saturated': False,
+                    'attribution_quality': 'EXACT_PROSPECTIVE',
+                    'attribution_quality_reasons': []})
+        assert set(rec) == outcome.RECORD_KEYS, set(rec) ^ outcome.RECORD_KEYS
         rec.update(extra)
         return rec
 
@@ -586,14 +627,34 @@ def main():
             g.get('ADMITTED_SHADOW_TURNS') == 3, json.dumps(g.get('ADMITTED_SHADOW_TURNS')))
         chk('O2 terminal outcomes counted', g.get('TERMINAL_OUTCOMES') == 2, json.dumps(g))
         chk('O3 the gap stays visible', g.get('MISSING_TERMINAL_OUTCOMES') == 1, json.dumps(g))
+        chk('O3a matched terminal outcomes are counted against admitted turns',
+            g.get('MATCHED_TERMINAL_OUTCOMES') == 2 and g.get('UNMATCHED_TERMINAL_OUTCOMES') == 0,
+            json.dumps({k: g.get(k) for k in ('MATCHED_TERMINAL_OUTCOMES', 'UNMATCHED_TERMINAL_OUTCOMES')}))
+        chk('O3b the matched count is never len(all rows)',
+            g.get('TERMINAL_COVERAGE_FORMULA', '').startswith('MATCHED_TERMINAL_OUTCOMES /')
+            and g.get('TERMINAL_OUTCOMES') != g.get('MATCHED_TERMINAL_OUTCOMES')
+            or g.get('MATCHED_TERMINAL_OUTCOMES') == g.get('TERMINAL_OUTCOMES'))
+        chk('O3c unmatched outcomes can never be silent',
+            g.get('UNMATCHED_TERMINAL_OUTCOMES_VISIBLE') == 'YES'
+            and 'UNMATCHED_TERMINAL_OUTCOMES' in g)
+        chk('O3d exact and partial are never pooled into one number',
+            g.get('EXACT_AND_PARTIAL_MIXING_FORBIDDEN') == 'YES'
+            and set(g.get('metrics_by_attribution_quality') or {})
+            == {'EXACT_PROSPECTIVE', 'PARTIAL_PROSPECTIVE'}
+            and g['metrics_by_attribution_quality']['PARTIAL_PROSPECTIVE']['turns'] == 0)
+        chk('O3e duration is named for its real scope',
+            g.get('DURATION_SEMANTIC') == 'observed_execution_duration_ms'
+            and 'api_request_count' not in g)
         chk('O4 missing terminal is never success', p.get('MISSING_TERMINAL_IS_SUCCESS') == 'NO'
             and g.get('MISSING_TERMINAL_IS_SUCCESS') == 'NO')
+        exact_g = (g.get('metrics_by_attribution_quality') or {}).get('EXACT_PROSPECTIVE', {})
         chk('O5 status distribution is closed-enum based',
-            g.get('terminal_status_distribution') == {'completed': 1, 'interrupted': 1},
-            json.dumps(g.get('terminal_status_distribution')))
+            exact_g.get('terminal_status_distribution') == {'completed': 1, 'interrupted': 1},
+            json.dumps(exact_g.get('terminal_status_distribution')))
         chk('O6 request-count and usage distributions are present',
-            g.get('api_request_count', {}).get('p50') == 2
-            and g.get('api_input_tokens_sum', {}).get('max') == 2200)
+            exact_g.get('api_request_count', {}).get('p50') == 2
+            and exact_g.get('api_input_tokens_sum', {}).get('max') == 2200,
+            json.dumps({k: exact_g.get(k) for k in ('api_request_count', 'api_input_tokens_sum')}))
         chk('O7 a record with an unexpected field is refused',
             p.get('REJECTED_UNEXPECTED_FIELD_RECORDS') == 1, json.dumps(p.get('REJECTED_UNEXPECTED_FIELD_RECORDS')))
         chk('O8 no sentinel reaches the aggregate',
@@ -637,6 +698,301 @@ def main():
         str(sentinel / 'logs') != str(config.LOG_DIR))
     chk('P3 no production path is reachable from the suite environment',
         '/opt/data/logs' not in str(config.LOG_DIR) and '/opt/data/state.db' != str(config.ENV_PATH))
+
+    # ---------------- Q: model switch count is a TRANSITION count ----------------
+    # A -> A = 0, A -> B = 1, A -> B -> B = 1, A -> B -> A = 2, A -> B -> A -> B = 3. models_seen is
+    # only a bounded unique inventory and must never decide the count (that is exactly how the
+    # previous implementation reported A -> B -> A as 2 ... incorrectly as 1).
+    reset()
+    switch_cases = [('Q1', ['a-model'], 0, 1), ('Q2', ['a-model', 'b-model'], 1, 2),
+                    ('Q3', ['a-model', 'b-model', 'b-model'], 1, 2),
+                    ('Q4', ['a-model', 'b-model', 'a-model'], 2, 2),
+                    ('Q5', ['a-model', 'b-model', 'a-model', 'b-model'], 3, 2)]
+    for tag, seq, expected_switches, expected_inventory in switch_cases:
+        turn = f'fx-{tag}:1'
+        plugin._on_pre_api_request(**pre(turn, f'fx-{tag}', api_request_id='r1', model=seq[0]))
+        for idx, model in enumerate(seq[1:], start=2):
+            plugin._on_post_api_request(**post(turn, f'fx-{tag}', api_request_id=f'r{idx}',
+                                               api_call_count=idx, model=model))
+        plugin._on_post_llm_call(**final(turn, f'fx-{tag}', model=seq[-1]))
+        rec = by_corr(turn)
+        chk(f'{tag} {" -> ".join(seq)} is {expected_switches} transition(s)',
+            rec and rec[0]['model_switch_count'] == expected_switches,
+            json.dumps(rec[0]['model_switch_count'] if rec else None))
+        chk(f'{tag}b models_seen stays a bounded inventory ({expected_inventory})',
+            rec and rec[0]['models_seen_count'] == expected_inventory,
+            json.dumps(rec[0]['models_seen_count'] if rec else None))
+    chk('Q6 A -> B -> A keeps 2 switches while the inventory holds only 2 models',
+        by_corr('fx-Q4:1')[0]['model_switch_count'] == 2
+        and by_corr('fx-Q4:1')[0]['models_seen_count'] == 2)
+    # The terminal hook may be the first place a model change shows up: it must pass through the
+    # same transition logic instead of overwriting actual_model_last.
+    reset()
+    plugin._on_pre_api_request(**pre('fx-Q7:1', 'fx-Q7', model='a-model'))
+    plugin._on_post_llm_call(**final('fx-Q7:1', 'fx-Q7', model='b-model'))
+    q7 = by_corr('fx-Q7:1')
+    chk('Q7 a model change first exposed by the final hook is counted as one transition',
+        q7 and q7[0]['model_switch_count'] == 1 and q7[0]['actual_model_last'] == 'b-model'
+        and q7[0]['models_seen_count'] == 2,
+        json.dumps([q7[0]['model_switch_count'], q7[0]['actual_model_last']] if q7 else None))
+    reset()
+    plugin._on_pre_api_request(**pre('fx-Q8:1', 'fx-Q8', model='a-model'))
+    plugin._on_post_api_request(**post('fx-Q8:1', 'fx-Q8', model='a-model'))
+    plugin._on_post_llm_call(**final('fx-Q8:1', 'fx-Q8', model='a-model'))
+    chk('Q8 a turn with one model throughout has zero transitions',
+        by_corr('fx-Q8:1')[0]['model_switch_count'] == 0)
+
+    # ---------------- R: request-identity saturation ----------------
+    reset()
+    plugin._on_pre_api_request(**pre('fx-R:1', 'fx-R', api_request_id='r0'))
+    for i in range(600):
+        plugin._on_pre_api_request(**pre('fx-R:1', 'fx-R', api_request_id=f'z{i}',
+                                         api_call_count=i + 2, retry_count=0))
+    r_st = outcome.stats()
+    chk('R1 the attempt key set saturates instead of growing without bound',
+        r_st['identity_saturated_turns'] == 1, json.dumps(r_st))
+    chk('R2 saturation keeps counting structure instead of dropping events',
+        outcome._open[list(outcome._open)[0]]['api_request_count'] == 601,
+        str(outcome._open[list(outcome._open)[0]]['api_request_count']))
+    # duplicate hooks after saturation: they cannot be proven duplicates any more, so the turn must
+    # not keep claiming EXACT.
+    duplicates_before = outcome.stats()['duplicate_request']
+    for i in range(10):
+        plugin._on_pre_api_request(**pre('fx-R:1', 'fx-R', api_request_id=f'z{i}',
+                                         api_call_count=i + 2, retry_count=0))
+    chk('R3 already-known attempts are still suppressed as duplicates',
+        outcome.stats()['duplicate_request'] == duplicates_before + 10,
+        json.dumps([duplicates_before, outcome.stats()['duplicate_request']]))
+    plugin._on_post_llm_call(**final('fx-R:1', 'fx-R'))
+    r = by_corr('fx-R:1')
+    chk('R4 the saturated turn is PARTIAL, never EXACT (EXACTNESS_NEVER_SILENTLY_FALSE)',
+        r and r[0]['attribution_quality'] == 'PARTIAL_PROSPECTIVE'
+        and r[0]['request_identity_saturated'] is True
+        and 'request_identity_saturated' in r[0]['attribution_quality_reasons'],
+        json.dumps(r[0]['attribution_quality_reasons'] if r else None))
+    chk('R5 a saturated count is present but not presented as exact',
+        r and r[0]['api_request_count'] > outcome._MAX_SEEN_ATTEMPTS
+        and r[0]['attribution_quality'] != 'EXACT_PROSPECTIVE')
+
+    # ---------------- S: the outcome cohort equals the routing-attempt cohort ----------------
+    reset()
+    submits_before = len(SUBMITS)
+    # S1: admitted human turn whose message is not structurally usable -> no routing attempt, no
+    # accumulator, no record (not an unmatched outcome).
+    plugin._on_pre_api_request(**pre('fx-S1:1', 'fx-S1', content=False))
+    chk('S1 a turn that never reached a routing attempt gets no accumulator',
+        outcome.stats()['started'] == 0 and len(SUBMITS) == submits_before)
+    # S2: internal marker invariant withholds routing -> same cohort
+    os.environ['JEV_INTERNAL_MARKERS'] = 'INTERNAL_MARKER_SENTINEL'
+    config._cache['at'] = 0
+    try:
+        kw = pre('fx-S2:1', 'fx-S2')
+        kw['user_message'] = 'please INTERNAL_MARKER_SENTINEL now'
+        plugin._on_pre_api_request(**kw)
+    finally:
+        os.environ.pop('JEV_INTERNAL_MARKERS', None)
+        config._cache['at'] = 0
+    chk('S2 a withheld turn is not in the outcome cohort either',
+        outcome.stats()['started'] == 0 and len(SUBMITS) == submits_before)
+    # S3: privacy fallback -> no routing attempt, no accumulator
+    from router import dossier as dossier_mod
+    real_build = dossier_mod.build
+    fallbacks = []
+    real_fallback = shadow_mod.log_privacy_fallback
+    try:
+        dossier_mod.build = lambda text: ('dossier', {'unsafe': True, 'hits': 1})
+        shadow_mod.log_privacy_fallback = lambda **kw: fallbacks.append(kw)
+        plugin._on_pre_api_request(**pre('fx-S3:1', 'fx-S3'))
+    finally:
+        dossier_mod.build = real_build
+        shadow_mod.log_privacy_fallback = real_fallback
+    chk('S3 a privacy fallback turn is not in the outcome cohort',
+        outcome.stats()['started'] == 0 and len(SUBMITS) == submits_before
+        and len(fallbacks) == 1, json.dumps(fallbacks))
+    # S4: the routing attempt itself is in the cohort, and the record says so
+    plugin._on_pre_api_request(**pre('fx-S4:1', 'fx-S4'))
+    plugin._on_post_llm_call(**final('fx-S4:1', 'fx-S4'))
+    s4 = by_corr('fx-S4:1')
+    chk('S4 a turn that reached a routing observation is in the cohort',
+        outcome.stats()['started'] == 1 and len(SUBMITS) == submits_before + 1 and len(s4) == 1)
+    chk('S5 the record declares its scope instead of implying one',
+        s4 and s4[0]['outcome_scope'] == 'routing_attempt', json.dumps(s4[0]['outcome_scope'] if s4 else None))
+    chk('S6 no record exists for a turn outside the cohort',
+        all(by_corr(t) == [] for t in ('fx-S1:1', 'fx-S2:1', 'fx-S3:1')))
+    chk('S7 the boundary is still a single implementation',
+        'OUTCOME_COHORT_CONTRACT' in (ROOT / 'plugin' / '__init__.py').read_text()
+        and 'OUTCOME_SCOPE = \'routing_attempt\'' in (ROOT / 'router' / 'outcome.py').read_text())
+
+    # ---------------- T: eviction under concurrency ----------------
+    reset()
+    submits_before = len(SUBMITS)
+    records_before_t = len(records())
+    n_turns = outcome._MAX_OPEN + 4
+    for i in range(n_turns):
+        plugin._on_pre_api_request(**pre(f'fx-T:{i}', f'fx-T-{i % 4}', api_request_id=f't{i}r1'))
+    for i in range(n_turns):
+        if i % 3 == 0:
+            plugin._on_post_api_request(**post(f'fx-T:{i}', f'fx-T-{i % 4}', api_request_id=f't{i}r1',
+                                               input_tokens=100 + i, output_tokens=10, cache_read=0,
+                                               cache_write=0))
+    st = outcome.stats()
+    chk('T1 eviction happened under load', st['evicted_unfinished'] == 4, json.dumps(st))
+    for i in range(n_turns):
+        plugin._on_post_llm_call(**final(f'fx-T:{i}', f'fx-T-{i % 4}'))
+    recs = {r['turn_correlation']: r for r in records()}
+    chk('T2 an evicted unfinished turn produces no terminal record',
+        not any(hashlib.sha256(f'fx-T:{i}'.encode()).hexdigest() in recs for i in range(4)))
+    chk('T3 no cross-turn contamination after eviction',
+        all(recs[hashlib.sha256(f'fx-T:{i}'.encode()).hexdigest()]['api_input_tokens_sum'] == 100 + i
+            for i in range(4, n_turns) if i % 3 == 0))
+    late_before = (outcome.stats()['late_hook_ignored'], len(records()))
+    plugin._on_post_api_request(**post('fx-T:0', 'fx-T-0', api_request_id='ghost', input_tokens=99999,
+                                       output_tokens=9999, cache_read=0, cache_write=0))
+    plugin._on_post_llm_call(**final('fx-T:0', 'fx-T-0'))
+    chk('T4 a late hook for an evicted turn cannot contaminate another accumulator',
+        outcome.stats()['late_hook_ignored'] == late_before[0] + 2 and len(records()) == late_before[1])
+    chk('T5 no live accumulator absorbed the ghost usage',
+        all(r['api_input_tokens_sum'] != 99999 for r in records()))
+    chk('T6 analytics can see the missing terminal (records < started)',
+        outcome.stats()['started'] == n_turns
+        and len(records()) - records_before_t == n_turns - 4,
+        json.dumps([outcome.stats()['started'], len(records()) - records_before_t]))
+
+    # ---------------- U: the parser rejects, it never coerces ----------------
+    good = ledger(hashlib.sha256(b'u-good').hexdigest())
+    probes = [
+        ('unknown schema', dict(good, schema_version='turn-outcome-v2'), outcome.REJECT_UNKNOWN_SCHEMA),
+        ('unexpected field', dict(good, prompt=PROMPT_SENTINEL), outcome.REJECT_UNEXPECTED_FIELD),
+        ('invalid terminal status', dict(good, terminal_status='failed'),
+         outcome.REJECT_INVALID_TERMINAL_STATUS),
+        ('invalid attribution quality', dict(good, attribution_quality='MAYBE_EXACT'),
+         outcome.REJECT_INVALID_ATTRIBUTION_QUALITY),
+        ('invalid degradation reason', dict(good, attribution_quality='PARTIAL_PROSPECTIVE',
+                                            attribution_quality_reasons=[RESPONSE_SENTINEL]),
+         outcome.REJECT_INVALID_REASON),
+        ('malformed numeric (string)', dict(good, duration_ms='1234'),
+         outcome.REJECT_MALFORMED_NUMERIC),
+        ('malformed numeric (negative)', dict(good, api_request_count=-1),
+         outcome.REJECT_MALFORMED_NUMERIC),
+        ('malformed numeric (bool)', dict(good, api_request_count=True),
+         outcome.REJECT_MALFORMED_NUMERIC),
+        ('wrong type', dict(good, runtime_error_observed='yes'), outcome.REJECT_INVALID_TYPE),
+        ('non-digest correlation', dict(good, turn_correlation='not-a-digest'),
+         outcome.REJECT_INVALID_TYPE),
+    ]
+    for label, probe, expected in probes:
+        chk(f'U.{label} is rejected with a closed reason',
+            outcome.validate_record(probe) == expected, str(outcome.validate_record(probe)))
+    missing = dict(good)
+    missing.pop('api_cache_write_tokens_sum')
+    chk('U.missing required field is rejected', outcome.validate_record(missing) == outcome.REJECT_MISSING_FIELD)
+    chk('U.valid record still passes', outcome.validate_record(good) is None)
+    poison_dir = tmp / 'poison-outcomes'
+    poison_dir.mkdir()
+    (poison_dir / 'turn-outcome-2026-10-06.jsonl').write_text('\n'.join(
+        [json.dumps(good)] + [json.dumps(probe) for _l, probe, _e in probes]
+        + ['{not json at all', json.dumps(dict(good, prompt=PROMPT_SENTINEL,
+                                              session_title=SESSION_SENTINEL))]) + '\n')
+    poison_shadow = tmp / 'poison-shadow'
+    poison_shadow.mkdir()
+    (poison_shadow / 'shadow-2026-10-06.jsonl').write_text(json.dumps(
+        {'turn_id': 'fx-A:1', 'platform': 'feishu', 'turn_origin': 'user', 'route': 'deepseek_flash',
+         'confidence': 0.5, 'success': True, 'would_execute': 'mimo_pro', 'mode': 'shadow',
+         'actual_model': 'deepseek-flash', 'deployment_generation': GEN}) + '\n')
+    poison_db = tmp / 'poison-state.db'
+    build_state_db(poison_db, ['fx-A'])
+    proc3 = subprocess.run([sys.executable, str(TOOL), '--generation', GEN, '--log-dir', str(poison_shadow),
+                            '--state-db', str(poison_db), '--prospective-telemetry', str(poison_dir)],
+                           capture_output=True, text=True, env=env)
+    chk('U.run analyzer over poisoned telemetry', proc3.returncode == 0, proc3.stderr[-300:])
+    if proc3.returncode == 0:
+        p3 = json.loads(proc3.stdout)['PROSPECTIVE_OUTCOME_TELEMETRY']
+        chk('U1 only the valid record is accepted', p3['RECORDS_ACCEPTED'] == 1, json.dumps(
+            {k: p3[k] for k in ('RECORDS_ACCEPTED', 'RECORDS_REJECTED')}))
+        chk('U2 rejections are reported as counts by closed reason',
+            p3['REJECTED_BY_REASON'].get(outcome.REJECT_UNEXPECTED_FIELD) == 2
+            and p3['REJECTED_BY_REASON'].get(outcome.REJECT_INVALID_TERMINAL_STATUS) == 1
+            and p3['REJECTED_UNPARSEABLE_LINES'] == 1, json.dumps(p3['REJECTED_BY_REASON']))
+        chk('U3 no rejected value is echoed back',
+            not any(s in proc3.stdout for s in ALL_SENTINELS))
+        chk('U4 the analyzer owns no second schema',
+            'router/outcome.py:validate_record' in p3.get('VALIDATOR', ''))
+
+    # ---------------- V: the day partition is UTC, never the process timezone ----------------
+    probe_src = ("import sys; sys.path.insert(0, %r);\n"
+                 "from router import outcome;\n"
+                 "print(outcome.record_path().name)") % str(ROOT)
+    day_env = dict(os.environ, HERMES_HOME=str(fixture_home), JEV_LOG_DIR=str(fixture_logs),
+                   JEV_STATE_DIR=str(fixture_state))
+    days = {}
+    for tz in ('UTC', 'Asia/Shanghai', 'Pacific/Kiritimati', 'Pacific/Midway'):
+        r = subprocess.run([sys.executable, '-c', probe_src], capture_output=True, text=True,
+                           env=dict(day_env, TZ=tz))
+        days[tz] = r.stdout.strip()
+        chk(f'V.{tz} probe runs', r.returncode == 0, r.stderr[-200:])
+    chk('V1 the record day does not depend on the process timezone',
+        len(set(days.values())) == 1, json.dumps(days))
+    chk('V2 the day partition constant is declared',
+        outcome.DAY_PARTITION_TZ == 'UTC'
+        and 'OUTCOME_DAY_PARTITION = UTC' in (ROOT / 'router' / 'outcome.py').read_text())
+    chk('V3 the file name is the UTC date',
+        days.get('UTC') == f'turn-outcome-{time.strftime("%Y-%m-%d", time.gmtime())}.jsonl',
+        days.get('UTC'))
+    chk('V4 a different day resolves to a different file',
+        outcome.record_path(day='2001-02-03').name == 'turn-outcome-2001-02-03.jsonl')
+
+    # ---------------- W: matched vs unmatched outcomes in the analyzer ----------------
+    w_out = tmp / 'w-outcomes'
+    w_shadow = tmp / 'w-shadow'
+    w_out.mkdir()
+    w_shadow.mkdir()
+    w_db = tmp / 'w-state.db'
+    build_state_db(w_db, ['fx-W1', 'fx-W2'])
+    (w_shadow / 'shadow-2026-10-06.jsonl').write_text('\n'.join(json.dumps(d) for d in (
+        {'turn_id': 'fx-W1:1', 'platform': 'feishu', 'turn_origin': 'user', 'route': 'deepseek_flash',
+         'confidence': 0.5, 'success': True, 'would_execute': 'mimo_pro', 'mode': 'shadow',
+         'actual_model': 'deepseek-flash', 'deployment_generation': GEN},
+        {'turn_id': 'fx-W2:1', 'platform': 'feishu', 'turn_origin': 'user', 'route': 'mimo_pro',
+         'confidence': 0.9, 'success': True, 'would_execute': 'mimo_pro', 'mode': 'shadow',
+         'actual_model': 'deepseek-flash', 'deployment_generation': GEN})) + '\n')
+    (w_out / 'turn-outcome-2026-10-06.jsonl').write_text('\n'.join(json.dumps(r) for r in (
+        ledger(hashlib.sha256(b'fx-W1:1').hexdigest()),
+        ledger(hashlib.sha256(b'fx-NEVER-SEEN:9').hexdigest()),
+        ledger(hashlib.sha256(b'fx-W3:1').hexdigest(), attribution_quality='PARTIAL_PROSPECTIVE',
+               attribution_quality_reasons=['request_identity_saturated'],
+               request_identity_saturated=True))) + '\n')
+    w_env = dict(os.environ, HERMES_HOME=str(fixture_home), JEV_LOG_DIR=str(fixture_logs),
+                 HERMES_STATE_DB=str(w_db), JEV_DEPLOYMENT_GENERATION=GEN)
+    proc4 = subprocess.run([sys.executable, str(TOOL), '--generation', GEN, '--log-dir', str(w_shadow),
+                            '--state-db', str(w_db), '--prospective-telemetry', str(w_out)],
+                           capture_output=True, text=True, env=w_env)
+    chk('W0 analyzer runs on the cohort fixture', proc4.returncode == 0, proc4.stderr[-300:])
+    if proc4.returncode == 0:
+        g4 = json.loads(proc4.stdout)['PROSPECTIVE_OUTCOME_TELEMETRY']['PER_GENERATION'][GEN]
+        chk('W1 ADMITTED_SHADOW_TURNS = 2', g4['ADMITTED_SHADOW_TURNS'] == 2, json.dumps(g4['ADMITTED_SHADOW_TURNS']))
+        chk('W2 TERMINAL_OUTCOMES = 3 (all accepted rows, matched or not)',
+            g4['TERMINAL_OUTCOMES'] == 3, json.dumps(g4['TERMINAL_OUTCOMES']))
+        chk('W3 MATCHED_TERMINAL_OUTCOMES = 1', g4['MATCHED_TERMINAL_OUTCOMES'] == 1,
+            json.dumps(g4['MATCHED_TERMINAL_OUTCOMES']))
+        chk('W4 MISSING_TERMINAL_OUTCOMES = 1', g4['MISSING_TERMINAL_OUTCOMES'] == 1,
+            json.dumps(g4['MISSING_TERMINAL_OUTCOMES']))
+        chk('W5 UNMATCHED_TERMINAL_OUTCOMES = 2 and is not silently dropped',
+            g4['UNMATCHED_TERMINAL_OUTCOMES'] == 2
+            and g4['UNMATCHED_TERMINAL_OUTCOMES_VISIBLE'] == 'YES',
+            json.dumps(g4['UNMATCHED_TERMINAL_OUTCOMES']))
+        chk('W6 unmatched outcomes never enter the routing denominator',
+            g4['TERMINAL_COVERAGE_DENOMINATOR'] == 'ADMITTED_SHADOW_TURNS'
+            and g4['MATCHED_TERMINAL_OUTCOMES'] + g4['MISSING_TERMINAL_OUTCOMES']
+            == g4['ADMITTED_SHADOW_TURNS'])
+        chk('W7 unmatched outcomes keep their own structural summary',
+            g4['UNMATCHED_TERMINAL_OUTCOME_SIGNALS']['turns'] == 2)
+        chk('W8 exact and partial are reported separately',
+            g4['metrics_by_attribution_quality']['EXACT_PROSPECTIVE']['turns'] == 1
+            and g4['metrics_by_attribution_quality']['PARTIAL_PROSPECTIVE']['turns'] == 0
+            and g4['metrics_by_attribution_quality']['PARTIAL_PROSPECTIVE']['request_identity_saturated_turns'] == 0,
+            json.dumps(g4['metrics_by_attribution_quality']))
+        chk('W9 a saturated turn is counted as saturated where it is reported',
+            g4['UNMATCHED_TERMINAL_OUTCOME_SIGNALS']['request_identity_saturated_turns'] == 1)
 
     report()
     return 1 if FAILS else 0

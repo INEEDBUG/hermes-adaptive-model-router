@@ -169,6 +169,10 @@ def _on_pre_api_request(**kwargs):
         if mode == 'off':
             return None
         if not _first_call_of_turn(kwargs):
+            # A later physical attempt of a turn that already opened an accumulator (a retry, or
+            # the next tool-loop call): counted structurally, and it can never admit a turn --
+            # observe_request only ever resolves an accumulator the boundary already created.
+            outcome.observe_request(kwargs)
             return None
 
         # --- human-turn provenance boundary: both gates, before any dossier work -------
@@ -176,11 +180,6 @@ def _on_pre_api_request(**kwargs):
         if not admitted:
             return None
         # --- end boundary -------------------------------------------------------------
-
-        # Prospective per-turn outcome telemetry: an accumulator exists only for an admitted
-        # human turn, and it is created after the same boundary the routing observation uses —
-        # never by a second, divergent notion of "human turn".
-        outcome.start(kwargs, platform=platform, turn_origin=origin)
 
         user_message = kwargs.get('user_message')
         if not isinstance(user_message, str) or not user_message.strip():
@@ -204,6 +203,17 @@ def _on_pre_api_request(**kwargs):
             # Content we cannot sanitise safely is never sent out for routing.
             shadow.log_privacy_fallback(turn_id=kwargs.get('turn_id'), actual_model=actual_model)
             return None
+
+        # ---- outcome cohort boundary ---------------------------------------------------
+        # OUTCOME_COHORT_CONTRACT: one accumulator == one turn that reached an actual canonical
+        # routing observation attempt. Reached only after every gate above passed (human
+        # provenance, structurally usable message, internal marker invariant, dossier built,
+        # privacy permits routing) and immediately before the submission, so the outcome cohort
+        # and the routing cohort are the same set of turns. A turn that stops earlier has no
+        # outcome record at all instead of an unmatched one.
+        outcome.start(kwargs, platform=platform, turn_origin=origin)
+        outcome.observe_request(kwargs)
+        # ---- end outcome cohort boundary -----------------------------------------------
 
         shadow.submit(d, turn_id=kwargs.get('turn_id'), actual_model=actual_model,
                       redaction_count=meta.get('hits'), mode=mode,

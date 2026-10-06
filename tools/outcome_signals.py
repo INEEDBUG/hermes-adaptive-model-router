@@ -330,14 +330,80 @@ def _quantiles(values: list) -> dict:
             "mean": round(sum(ordered) / len(ordered), 1)}
 
 
+def _load_outcome_module():
+    """Import the canonical turn-outcome schema/validator from the repository.
+
+    The analyzer must not keep a second, weaker copy of the schema: an unknown schema version, an
+    unexpected field, an invalid terminal status, an invalid attribution quality or a malformed
+    numeric has to reject the record with the same rules the writer documents. If the canonical
+    module cannot be loaded the audit fails closed instead of falling back to a laxer check.
+    """
+    repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from router import outcome as outcome_module
+
+    return outcome_module
+
+
+def _quantiles_or_none(values: list) -> dict:
+    return _quantiles(values) if values else None
+
+
+def _structural_summary(rows: list) -> dict:
+    """Content-free structural summary for one cohort of records."""
+    return {
+        "turns": len(rows),
+        "observed_execution_duration_ms": _quantiles_or_none(
+            [int(r.get("duration_ms") or 0) for r in rows]),
+        "api_logical_call_count": _quantiles_or_none(
+            [int(r.get("api_logical_call_count") or 0) for r in rows]),
+        "api_request_count": _quantiles_or_none(
+            [int(r.get("api_request_count") or 0) for r in rows]),
+        "api_success_count": _quantiles_or_none(
+            [int(r.get("api_success_count") or 0) for r in rows]),
+        "api_error_count": _quantiles_or_none(
+            [int(r.get("api_error_count") or 0) for r in rows]),
+        "retry_count_observed": _quantiles_or_none(
+            [int(r.get("retry_count_observed") or 0) for r in rows]),
+        "api_input_tokens_sum": _quantiles_or_none(
+            [int(r.get("api_input_tokens_sum") or 0) for r in rows]),
+        "api_output_tokens_sum": _quantiles_or_none(
+            [int(r.get("api_output_tokens_sum") or 0) for r in rows]),
+        "api_cache_read_tokens_sum": _quantiles_or_none(
+            [int(r.get("api_cache_read_tokens_sum") or 0) for r in rows]),
+        "api_cache_write_tokens_sum": _quantiles_or_none(
+            [int(r.get("api_cache_write_tokens_sum") or 0) for r in rows]),
+        "api_prompt_tokens_max_request": _quantiles_or_none(
+            [int(r.get("api_prompt_tokens_max_request") or 0) for r in rows]),
+        "api_duration_ms_sum": _quantiles_or_none(
+            [int(r.get("api_duration_ms_sum") or 0) for r in rows]),
+        "cache_write_observed_turns": sum(
+            1 for r in rows if int(r.get("api_cache_write_tokens_sum") or 0) > 0),
+        "runtime_error_observed_turns": sum(1 for r in rows if r.get("runtime_error_observed")),
+        "retry_observed_turns": sum(1 for r in rows if int(r.get("retry_count_observed") or 0) > 0),
+        "model_switch_observed_turns": sum(
+            1 for r in rows if int(r.get("model_switch_count") or 0) > 0),
+        "request_identity_saturated_turns": sum(
+            1 for r in rows if r.get("request_identity_saturated")),
+        "terminal_status_distribution": dict(collections.Counter(
+            str(r.get("terminal_status")) for r in rows)),
+        "finish_reason_distribution": dict(collections.Counter(
+            str(r.get("finish_reason_last")) for r in rows)),
+    }
+
+
 def prospective_aggregate(paths: list, coverage: dict, records: list, sources: dict,
-                        shadow_stats) -> dict:
+                          shadow_stats) -> dict:
     """Aggregate the prospective per-turn outcome records, without exposing any identifier.
 
-    ``turn_correlation`` is a local digest. It is used here only to count how many admitted
-    shadow turns produced a terminal record; the digests themselves are never printed.
+    ``turn_correlation`` is a local digest: it is used only to decide whether a record matches an
+    admitted shadow turn of the same generation, and the digests themselves are never printed.
+    Validation is delegated to ``router/outcome.py`` so the writer and the analyzer cannot drift;
+    a rejected record is counted by closed reason and its value is never echoed.
     """
-    rows, bad_schema, unexpected = [], 0, 0
+    validator = _load_outcome_module()
+    accepted, rejects, parse_failed = [], {}, 0
     for p in paths:
         for line in pathlib.Path(p).read_text(errors="replace").splitlines():
             if not line.strip():
@@ -345,68 +411,82 @@ def prospective_aggregate(paths: list, coverage: dict, records: list, sources: d
             try:
                 rec = json.loads(line)
             except Exception:
+                parse_failed += 1
                 continue
-            if not isinstance(rec, dict):
-                continue
-            if rec.get("schema_version") != OUTCOME_SCHEMA:
-                bad_schema += 1
-                continue
-            if set(rec) - OUTCOME_KEYS:
-                unexpected += 1
-                continue
-            rows.append(rec)
+            reason = validator.validate_record(rec)
+            if reason:
+                rejects[reason] = rejects.get(reason, 0) + 1
+            else:
+                accepted.append(rec)
 
     by_generation = {}
     for gen in coverage:
-        gen_rows = [r for r in rows if (r.get("deployment_generation") or "") == gen]
-        digests = {r.get("turn_correlation") for r in gen_rows if r.get("turn_correlation")}
+        gen_rows = [r for r in accepted if (r.get("deployment_generation") or "") == gen]
         admitted = [r for r in records
                     if (r.get("deployment_generation") or shadow_stats.GENERATION_LEGACY) == gen
                     and r.get("platform") == "feishu" and r.get("turn_origin") == "user"
+                    and r.get("route") != "LOCAL_PRIVACY_FALLBACK"
                     and not shadow_stats.classify(r, sources).startswith("excluded")]
-        matched = sum(1 for r in admitted
-                      if hashlib.sha256(str(r.get("turn_id") or "").encode()).hexdigest() in digests)
+        admitted_digests = {hashlib.sha256(str(r.get("turn_id") or "").encode()).hexdigest()
+                            for r in admitted}
+        matched = [r for r in gen_rows if r.get("turn_correlation") in admitted_digests]
+        unmatched = [r for r in gen_rows if r.get("turn_correlation") not in admitted_digests]
+        matched_digests = {r.get("turn_correlation") for r in matched}
+        missing = max(0, len(admitted_digests) - len(matched_digests))
+        split = {}
+        for quality in ("EXACT_PROSPECTIVE", "PARTIAL_PROSPECTIVE"):
+            split[quality] = _structural_summary(
+                [r for r in matched if r.get("attribution_quality") == quality])
         by_generation[gen] = {
+            # ---- coverage: matched counts against the routing denominator -------------------
             "ADMITTED_SHADOW_TURNS": len(admitted),
+            "ADMITTED_SHADOW_TURNS_SEMANTIC": ("shadow observations of this generation that passed the "
+                                               "human-turn boundary and produced a routing attempt "
+                                               "(privacy fallbacks excluded)"),
             "TERMINAL_OUTCOMES": len(gen_rows),
-            "MISSING_TERMINAL_OUTCOMES": max(0, len(admitted) - matched),
+            "MATCHED_TERMINAL_OUTCOMES": len(matched),
+            "MATCHED_TERMINAL_SEMANTIC": ("records whose turn_correlation hashes back to an admitted shadow "
+                                          "turn of this generation"),
+            "MISSING_TERMINAL_OUTCOMES": missing,
             "MISSING_TERMINAL_IS_SUCCESS": "NO",
-            "terminal_status_distribution": dict(collections.Counter(
-                r.get("terminal_status") for r in gen_rows)),
-            "request_count_distribution": dict(sorted(collections.Counter(
-                int(r.get("api_request_count") or 0) for r in gen_rows).items())),
-            "api_request_count": _quantiles([int(r.get("api_request_count") or 0) for r in gen_rows]),
-            "duration_ms": _quantiles([int(r.get("duration_ms") or 0) for r in gen_rows]),
-            "api_input_tokens_sum": _quantiles([int(r.get("api_input_tokens_sum") or 0) for r in gen_rows]),
-            "api_output_tokens_sum": _quantiles([int(r.get("api_output_tokens_sum") or 0) for r in gen_rows]),
-            "api_cache_read_tokens_sum": _quantiles(
-                [int(r.get("api_cache_read_tokens_sum") or 0) for r in gen_rows]),
-            "api_cache_write_tokens_sum": _quantiles(
-                [int(r.get("api_cache_write_tokens_sum") or 0) for r in gen_rows]),
-            "api_prompt_tokens_max_request": _quantiles(
-                [int(r.get("api_prompt_tokens_max_request") or 0) for r in gen_rows]),
-            "api_duration_ms_sum": _quantiles([int(r.get("api_duration_ms_sum") or 0) for r in gen_rows]),
-            "api_cache_write_observed_turns": sum(
-                1 for r in gen_rows if int(r.get("api_cache_write_tokens_sum") or 0) > 0),
-            "runtime_error_observed_turns": sum(
-                1 for r in gen_rows if r.get("runtime_error_observed")),
-            "retry_observed_turns": sum(1 for r in gen_rows
-                                        if int(r.get("retry_count_observed") or 0) > 0),
-            "model_switch_observed_turns": sum(
-                1 for r in gen_rows if int(r.get("model_switch_count") or 0) > 0),
-            "attribution_quality": sorted({str(r.get("attribution_quality")) for r in gen_rows}),
+            "UNMATCHED_TERMINAL_OUTCOMES": len(unmatched),
+            "UNMATCHED_TERMINAL_SEMANTIC": ("records with no matching admitted shadow turn of this generation "
+                                            "(other generation, other platform, a turn that never produced a "
+                                            "routing attempt, or a record kept from a failed generation)"),
+            "UNMATCHED_TERMINAL_OUTCOMES_VISIBLE": "YES",
+            "TERMINAL_COVERAGE_DENOMINATOR": "ADMITTED_SHADOW_TURNS",
+            "TERMINAL_COVERAGE_FORMULA": ("MATCHED_TERMINAL_OUTCOMES / ADMITTED_SHADOW_TURNS; "
+                                          "len(all outcome rows) is never used as the matched count"),
+            "ATTRIBUTION_QUALITY_DECLARED": ["EXACT_PROSPECTIVE", "PARTIAL_PROSPECTIVE"],
+            "EXACT_AND_PARTIAL_MIXING_FORBIDDEN": "YES",
+            "metrics_by_attribution_quality": split,
+            "UNMATCHED_TERMINAL_OUTCOME_SIGNALS": _structural_summary(unmatched),
+            "DURATION_SEMANTIC": validator.DURATION_SEMANTIC,
+            "duration_ms_definition": ("accumulator open (after admission, just before the routing "
+                                       "submission) -> observed terminal hook; it is not user-perceived "
+                                       "latency, not the full wall time from message arrival, and not "
+                                       "model latency"),
         }
     return {
         "FILES": [pathlib.Path(p).name for p in paths],
-        "RECORDS": len(rows),
-        "REJECTED_SCHEMA_RECORDS": bad_schema,
-        "REJECTED_UNEXPECTED_FIELD_RECORDS": unexpected,
+        "RECORDS_LINES": len(accepted) + sum(rejects.values()) + parse_failed,
+        "RECORDS_ACCEPTED": len(accepted),
+        "RECORDS_REJECTED": sum(rejects.values()) + parse_failed,
+        "REJECTED_BY_REASON": dict(sorted(rejects.items())),
+        "REJECTED_UNPARSEABLE_LINES": parse_failed,
+        "REJECTED_SCHEMA_RECORDS": rejects.get(validator.REJECT_UNKNOWN_SCHEMA, 0),
+        "REJECTED_UNEXPECTED_FIELD_RECORDS": rejects.get(validator.REJECT_UNEXPECTED_FIELD, 0),
+        "VALIDATOR": "router/outcome.py:validate_record (canonical; the analyzer owns no second schema)",
         "SCHEMA_VERSION_EXPECTED": OUTCOME_SCHEMA,
-        "TERMINAL_STATUS_ENUM": list(OUTCOME_STATUSES),
+        "TERMINAL_STATUS_ENUM": list(validator.TERMINAL_STATUSES),
+        "ATTRIBUTION_QUALITY_ENUM": list(validator.ATTRIBUTION_QUALITIES),
+        "DEGRADATION_REASON_ENUM": list(validator.DEGRADATION_REASONS),
         "MISSING_TERMINAL_IS_SUCCESS": "NO",
+        "EXACTNESS_NEVER_SILENTLY_FALSE": "YES",
         "PER_GENERATION": by_generation,
         "CORRELATION_NOT_CAUSATION": "YES",
-        "no_identifier_in_output": "raw turn ids and correlation digests are never printed",
+        "no_identifier_in_output": ("raw turn ids and correlation digests are never printed, and a "
+                                    "rejected record's value is never echoed"),
     }
 
 
