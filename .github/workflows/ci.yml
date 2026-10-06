@@ -69,6 +69,17 @@ jobs:
       - name: prospective outcome telemetry (offline, content-blind)
         run: python3 tests/test_outcome_telemetry.py
 
+      # The gate reads a source tree only: it proves the hooks the candidate needs still exist
+      # and still carry their load-bearing fields. On a runner without a Hermes checkout it
+      # validates against a fixture tree it builds itself, so the job stays hermetic and honest.
+      - name: hook-contract gate (source compatibility, offline)
+        run: python3 tests/test_hook_contract.py
+
+      # Deployment rehearsal: export the committed revision, load it in a fresh process through a
+      # fake hook registry with an isolated log dir and shadow state, sockets blocked. No install.
+      - name: deployment rehearsal (frozen export, no network, no install)
+        run: python3 tests/test_deployment_rehearsal.py
+
       - name: state initialiser (dry run)
         run: python3 tools/init_state.py --dry-run
 
