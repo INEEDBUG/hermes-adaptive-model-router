@@ -248,15 +248,29 @@ the routing-quality analyser.
 `G1_REAL_TRAFFIC_SAMPLE` remains `INSUFFICIENT`: struggle features do not add sample breadth,
 longitudinal evidence, concurrency coverage or context/cache instrumentation.
 
-# Prospective telemetry implementation candidate
+# Prospective telemetry — deployed and canary-validated
 
-**Repository implementation only. NOT deployed.** Production still runs `canonical-dff8b11` in
-`shadow` with Auto disabled, and no environment variable was set.
+**Deployed to production and validated on a real natural human turn.** Production runs generation
+`canonical-922bd11` (runtime SHA `922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`) in `shadow` with Auto
+disabled and `JEV_AUTO_APPROVED` absent; the plugin registers the five hooks described below.
+
+The first real human turn after that deployment produced exactly one routing observation and exactly
+one matching `turn-outcome-v1` record: `outcome_scope = routing_attempt`,
+`terminal_status = completed`, `attribution_quality = EXACT_PROSPECTIVE`, no degradation reason,
+content-blind, no model switch. Exact per-turn structural outcome evidence therefore accumulates
+**from `canonical-922bd11` onwards**; earlier generations stay inexact and are never re-labelled.
+
+Standing constraints of that deployment: the router remains in `shadow` mode, Auto stays disabled
+(`JEV_AUTO_APPROVED` absent, no `JEV_AUTO*` key exists), and `G1_REAL_TRAFFIC_SAMPLE` remains
+`INSUFFICIENT` — outcome telemetry adds structural per-turn facts, not sample breadth or a
+correctness label. `DEFAULT_MODEL_STRUGGLE != ROUTING_CORRECTNESS` and
+`DEFAULT_MODEL_STRUGGLE != MIMO_WOULD_BE_BETTER`: none of these fields is a verdict on answer
+quality, and none of them proves that a counterfactual model would have succeeded.
 
 Read this part with the following consequences in mind:
 
-* per-turn exact figures start existing only **after a future deployment**; nothing here makes the
-  historical records exact retroactively;
+* per-turn exact figures start existing only **from `canonical-922bd11` onwards**; nothing here makes
+  the historical records exact retroactively;
 * `missing terminal != success` — a turn whose terminal hook was never observed leaves no record,
   and analytics must keep the gap visible (`ADMITTED_SHADOW_TURNS - TERMINAL_OUTCOMES`);
 * billed usage is not context size: `api_input_tokens_sum` sums the **uncached** input bucket over
@@ -523,5 +537,5 @@ tests/test_deployment_rehearsal.py     exports the candidate (git archive HEAD, 
 
 Version of record: ``plugin/plugin.yaml`` and ``router/__init__.py`` carry the same number, asserted
 by the gate and the suite. The repository tags releases (v0.1.0 .. v0.2.0, one tag per release);
-``0.3.0`` is deliberately untagged because nothing is released and nothing is deployed, and no tag
-is created this round.
+``0.3.0`` is deliberately untagged: it is the deployed-and-validated telemetry generation, but no
+release is published for it and none of the milestone work creates a tag.

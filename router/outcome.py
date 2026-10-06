@@ -1,8 +1,10 @@
-"""Prospective per-turn outcome telemetry — repository implementation candidate.
+"""Prospective per-turn outcome telemetry.
 
-Status: **implemented here, NOT deployed.** Production still runs ``canonical-dff8b11`` in
-``shadow`` with Auto disabled. Per-turn exact figures start existing only after a future
-deployment; historical records do not become exact retroactively.
+Status: **deployed and canary-validated.** Production runs generation ``canonical-922bd11``
+(runtime SHA ``922bd11aa3e019059acfc0195bf7dd1b24bc5e9c``) in ``shadow`` with Auto disabled, and a
+real natural human turn produced one routing observation and one matching terminal record.
+Per-turn exact figures start existing only from that generation onwards; historical records do not
+become exact retroactively.
 
 What this module records
 ------------------------

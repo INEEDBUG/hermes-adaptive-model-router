@@ -1,8 +1,10 @@
 # Prospective outcome telemetry — deployment review (2026-10-06)
 
-Review of the repository candidate *before* any deployment decision. **Nothing here is deployed.**
-Production still runs ``canonical-dff8b11`` in ``shadow`` with Auto disabled, and no environment
-variable, plugin file, runtime generation or gateway process was touched.
+Review of the repository candidate *before* any deployment decision. At review time nothing was
+deployed and production still ran ``canonical-dff8b11``; the authorised deployment later that day
+promoted exactly this candidate (``canonical-922bd11``, one official restart, no rollback) and a
+natural human canary validated the telemetry, so the review's historical statements below stay as
+they were written.
 
 ## Blockers found and fixed
 

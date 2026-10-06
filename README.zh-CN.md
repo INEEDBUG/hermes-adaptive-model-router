@@ -110,10 +110,11 @@ flowchart TD
 对上面这张表的两点限定说明（都在公开仓库中跟踪）：
 
 - **规范线与实际部署。** `main` 上的公开 v0.2.0 是**规范**仓库线，且当前观测到的生产部署
-  现已**对齐到规范 runtime candidate**（`dff8b117d38f597617497fca5567b0e7ec0bde9a`，
-  generation `canonical-dff8b11`）：它就是规范 shadow 实现，而非私有变体，此前的部署漂移
-  不再适用。它仍处于 shadow、auto 关闭状态，并已在该 generation 上观测到一次真实真人
-  canary。见 [docs/production-convergence-closeout-2026-10-06.md](docs/production-convergence-closeout-2026-10-06.md)；
+  就是**该规范线本身**（`922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`，
+  generation `canonical-922bd11`）：它就是规范 shadow 实现，而非私有变体，此前的部署漂移
+  不再适用。它仍处于 shadow、auto 关闭状态，已观测到一次真实真人 canary，且前瞻式
+  per-turn outcome telemetry 已在一次自然真人轮次上完成部署验证——精确的 per-turn
+  结构性证据从该 generation 起开始积累。见 [docs/production-convergence-closeout-2026-10-06.md](docs/production-convergence-closeout-2026-10-06.md)；
   更早的漂移分析属历史记录：[docs/production-reconciliation.md](docs/production-reconciliation.md)。
 - **G1 证据已存在，但 G1 未通过。** 聚合后的 content-free shadow 证据已发布在
   [docs/g1-shadow-evidence-2026-10-06.md](docs/g1-shadow-evidence-2026-10-06.md)，
