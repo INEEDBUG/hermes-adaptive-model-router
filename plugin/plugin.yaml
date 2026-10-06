@@ -9,7 +9,7 @@ author: "hermes-adaptive-model-router contributors"
 kind: standalone
 hooks:
   - pre_api_request
-  # Prospective outcome telemetry (repository candidate): structural execution facts for an
+  # Deployed prospective outcome telemetry: structural execution facts for an
   # admitted human turn, one terminal record per turn. Content-blind; see router/outcome.py.
   - post_api_request
   - api_request_error

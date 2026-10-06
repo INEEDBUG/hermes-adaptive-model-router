@@ -100,6 +100,7 @@ flowchart TD
 | 运行时 kill switch | **已验证**（26/26 parser 测试，fail-safe = off；无 override 标志） |
 | 真实/测试遥测分离 | **已验证** |
 | 路由可用性 | **配置，绝不假定** —— `JEV_AVAILABLE_ROUTES`；公开默认值为空 |
+| 前瞻式 per-turn 结构性 outcome telemetry | **已在生产验证** —— 以 generation `canonical-922bd11`（runtime SHA `922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`）部署，并由一次真实自然真人轮次确认：1 次路由观测、1 条匹配的 `turn-outcome-v1` 记录、`EXACT_PROSPECTIVE`、content blind |
 | CI（离线套件 + 密钥扫描） | 已在 `.github/workflows/ci.yml` **配置**；无需任何密钥 |
 | 自动 provider 切换 | **设计阶段 —— 未启用** |
 | auto 模式的并发隔离 | **已分析；仍有一项实证测试未完成** |
@@ -109,8 +110,9 @@ flowchart TD
 
 对上面这张表的两点限定说明（都在公开仓库中跟踪）：
 
-- **规范线与实际部署。** `main` 上的公开 v0.2.0 是**规范**仓库线，且当前观测到的生产部署
-  就是**该规范线本身**（`922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`，
+- **规范线、版本与实际部署。** 最新 tagged release 是 **v0.2.0**。当前 `main` 与正在运行的
+  生产 runtime 都承载版本 **0.3.0**、generation `canonical-922bd11`，且 **0.3.0 仍未打 tag**。
+  当前观测到的生产部署就是**该规范线本身**（`922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`，
   generation `canonical-922bd11`）：它就是规范 shadow 实现，而非私有变体，此前的部署漂移
   不再适用。它仍处于 shadow、auto 关闭状态，已观测到一次真实真人 canary，且前瞻式
   per-turn outcome telemetry 已在一次自然真人轮次上完成部署验证——精确的 per-turn
@@ -123,9 +125,13 @@ flowchart TD
 
 ## 工作原理
 
-1. **Hook。** 该 plugin 只注册一个观察者 hook（`pre_api_request`），Hermes 核心本就
-   会在每次 LLM 请求前调用它 —— 并且本就用 fail-open 的错误处理包裹它。该 hook 始终
-   返回 `None`，因此不会注入任何上下文，也不会修改任何请求内容。
+1. **Hooks。** 一个 hook 负责路由观测，另外四个负责记录执行结果：
+   * **路由观测 hook —— `pre_api_request`：** 唯一负责 admission、构建 dossier 并调用 JEV
+     服务的 hook。Hermes 核心本就会在每次 LLM 请求前调用它，并本就用 fail-open 的错误
+     处理包裹它；它始终返回 `None`，因此不会注入任何上下文，也不会修改任何请求内容。
+   * **outcome telemetry hooks —— `post_api_request`、`api_request_error`、`post_llm_call`、
+     `agent_loop_stopped`：** 只为已被路由 hook 接纳的轮次记录 content-free 的结构性执行事实。
+     它们不改变模型、不修改请求、不重新 admission，也无法启用 Auto。
 2. **一轮中的首次调用。** 路由每轮只发生一次：重试与后续的工具循环迭代会被显式跳过
    （`api_call_count`/`retry_count`）。
 3. **Dossier。** 由当前用户消息构建一个最小 JSON 对象：脱敏并截断后的文本、布尔需求

@@ -101,6 +101,7 @@ explicit approval flag that the code checks itself.
 | Runtime kill switch | **Validated** (26/26 parser tests, fail-safe = off; no override flag) |
 | Real/test telemetry separation | **Validated** |
 | Route availability | **Configured, never assumed** — `JEV_AVAILABLE_ROUTES`; the public default is empty |
+| Prospective per-turn structural outcome telemetry | **Validated in production** — deployed as generation `canonical-922bd11` (runtime SHA `922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`) and confirmed by a real natural human turn: one routing observation, one matching `turn-outcome-v1` record, `EXACT_PROSPECTIVE`, content-blind |
 | CI (offline suites + secret scan) | **Configured** in `.github/workflows/ci.yml`; no secrets required |
 | Automatic provider switching | **Design stage — not enabled** |
 | Concurrency isolation for auto mode | **Analyzed; one empirical test still outstanding** |
@@ -111,9 +112,10 @@ numbers.
 
 Two statements qualify that table, and both are tracked publicly:
 
-- **Canonical line and observed deployment.** Public v0.2.0 on `main` is the canonical
-  repository line, and the observed production deployment is **the canonical line itself**
-  (`922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`, generation `canonical-922bd11`): it is the
+- **Canonical line, versions and observed deployment.** The latest tagged release is **v0.2.0**.
+  Current `main` and the deployed production runtime carry version **0.3.0**, generation
+  `canonical-922bd11`, and **0.3.0 remains untagged**. The observed production deployment is
+  **the canonical line itself** (`922bd11aa3e019059acfc0195bf7dd1b24bc5e9c`): it is the
   canonical shadow implementation, not a private variant, so the earlier deployment drift no
   longer applies. It still runs shadow-only with auto disabled, a real human canary has been
   observed, and prospective per-turn outcome telemetry is deployed and validated on a
@@ -132,10 +134,15 @@ Two statements qualify that table, and both are tracked publicly:
 1. **Provenance.** Before any routing work, the hook checks the two gates described above.
    Nothing else in this list runs for a turn that is not an allow-listed human turn, and the
    rejection is counted locally without recording any content.
-2. **Hook.** The plugin registers a single observer hook (`pre_api_request`) that the
-   Hermes core already calls before each LLM request — and already wraps in
-   fail-open error handling. The hook always returns `None`, so no context is
-   injected and no request content is modified.
+2. **Hooks.** One hook does the routing observation; four more record outcomes:
+   * **Routing observation hook — `pre_api_request`:** the only hook that admits a turn, builds the
+     dossier and consults the JEV service. Hermes core already calls it before each LLM request and
+     already wraps it in fail-open error handling, and it always returns `None`, so no context is
+     injected and no request content is modified.
+   * **Outcome telemetry hooks — `post_api_request`, `api_request_error`, `post_llm_call`,
+     `agent_loop_stopped`:** these only record content-free structural execution facts for a turn the
+     routing hook already admitted. They do not change the model, do not modify the request, do not
+     re-admit a turn and cannot enable Auto.
 3. **First call of a turn.** Routing happens once per turn: retries and subsequent
    tool-loop iterations are explicitly skipped (`api_call_count`/`retry_count`).
 4. **Dossier.** A minimal JSON object is built from the current user message:

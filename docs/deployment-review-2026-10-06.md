@@ -75,5 +75,6 @@ AUTO_ENABLED             = NO
 PRODUCTION_DEPLOYED      = NO
 ```
 
-``READY`` means the repository candidate passes every gate this round defined; it does **not**
+``READY`` — historical review framing — means the repository candidate passed every gate this round
+defined; it does **not**
 authorise a deployment. The next milestone is an explicit deployment authorisation.

@@ -1,11 +1,26 @@
 # Privacy-safe outcome signals
 
-Status: **design + read-only audit**. Auto is disabled. Nothing here is deployed, and nothing here
-is a routing-correctness label.
+## Production status — authoritative
 
-This document records what execution-outcome evidence Hermes can actually produce for a single
-human turn today, what it cannot, and what a future per-turn outcome record would have to look
-like. It is written so that a later phase cannot quietly upgrade a proxy into a verdict.
+```
+PRODUCTION STATUS = DEPLOYED_AND_CANARY_VALIDATED
+runtime           = 922bd11aa3e019059acfc0195bf7dd1b24bc5e9c
+generation        = canonical-922bd11
+Router            = shadow
+Auto              = disabled (JEV_AUTO_APPROVED absent)
+G1                = INSUFFICIENT
+NATURAL CANARY    = PASS (real human turn, the first one after the static deployment)
+```
+
+**Exact prospective per-turn structural outcomes begin only from `canonical-922bd11` onward.** No
+historical generation is re-labelled exact, and nothing in this document is a routing-correctness
+label.
+
+Sections 1–12 below are the **historical pre-deployment findings and design record**: they explain
+what Hermes could and could not produce *before* this deployment, and why the instrumentation was
+required. They are kept so that no later phase can quietly upgrade an argument into a verdict. The
+authoritative description of what runs today is the section
+*“Prospective telemetry — deployed and canary-validated”*.
 
 ## 1. The boundary this phase must never cross
 
@@ -87,7 +102,11 @@ The follow-up gap (assistant completion → next human message) is computable an
 distribution only: `EXPERIMENTAL`, with **no threshold applied**. A 30-second gap is not "bad"; it
 is also how normal conversation looks.
 
-## 5. Historical join coverage
+## 5. Historical join coverage (pre-deployment audit)
+
+*HISTORICAL PRE-DEPLOYMENT FINDINGS — these are the numbers the read-only audit could join before
+`canonical-922bd11` existed. They are not today's production state, and prospective records do not
+exist for these generations.*
 
 Reported per deployment generation, never merged (the two generations do not share semantics):
 
@@ -175,7 +194,10 @@ that has no per-turn source at all.
 
 `DEFAULT_MODEL_STRUGGLE_SIGNAL_AVAILABLE = PARTIAL`.
 
-## 9. Why prospective instrumentation is required
+## 9. Why prospective instrumentation was required before `canonical-922bd11`
+
+*HISTORICAL PRE-DEPLOYMENT FINDINGS — this section records why a per-turn record was needed at all.
+The record it argues for now exists and is deployed; see the authoritative section below.*
 
 `RELIABLE_POST_TURN_HOOK_AVAILABLE = PARTIAL`. There is no single hook guaranteed for every turn.
 From the read-only source audit:
@@ -191,10 +213,16 @@ From the read-only source audit:
 | context-engine `on_turn_complete` | per turn, from the finalization seam | YES (`turn_id`, `api_call_count`, `interrupted`, `failed`, `turn_exit_reason`) | YES (usage shape) | internal extension point (engine override only); abnormal early returns skip it |
 
 Historically, none of this was recorded per turn, which is exactly why the token and cache
-aggregates cannot be attributed to a turn after the fact. The candidate hooks show that a
-turn-scoped, content-free terminal record is **feasible to design** — not that it exists.
+aggregates cannot be attributed to a turn after the fact. At audit time the candidate hooks showed
+only that a turn-scoped, content-free terminal record was **feasible to design** — it did not exist
+yet, which is what the later deployment implemented (and what the authoritative section below
+describes).
 
-## 10. Prospective design (design only — do not deploy from this document)
+## 10. Prospective design (historical pre-deployment design record)
+
+*This is the design as written before deployment. The implemented schema, its contract and its
+production status are described in the authoritative section below; nothing here authorises a
+deployment.*
 
 `turn-outcome-v1`: append-only, at most one terminal record per admitted human turn.
 
@@ -229,8 +257,13 @@ verdict.
 
 ```
 python3 tools/outcome_signals.py --generation all
-python3 tools/outcome_signals.py --generation canonical-dff8b11 --json /path/outside/the/deployment.json
-python3 tools/routing_quality.py --generation canonical-dff8b11 --outcome-aggregate /path/aggregate.json
+python3 tools/outcome_signals.py --generation canonical-922bd11 --json /path/outside/the/deployment.json
+python3 tools/routing_quality.py --generation canonical-922bd11 --outcome-aggregate /path/aggregate.json
+
+Use the generation you actually mean: prospective per-turn outcome records exist only from
+`canonical-922bd11` onward, so a prospective analysis that names an older generation is asking about
+a cohort that has no such records. Historical cohorts stay addressable by naming them explicitly
+(for example `--generation legacy_unversioned`).
 ```
 
 `tools/outcome_signals.py` is read-only, offline, generation-aware, refuses to replicate a session
@@ -259,6 +292,19 @@ one matching `turn-outcome-v1` record: `outcome_scope = routing_attempt`,
 `terminal_status = completed`, `attribution_quality = EXACT_PROSPECTIVE`, no degradation reason,
 content-blind, no model switch. Exact per-turn structural outcome evidence therefore accumulates
 **from `canonical-922bd11` onwards**; earlier generations stay inexact and are never re-labelled.
+
+```
+turn-outcome-v1              = DEPLOYED
+generation                   = canonical-922bd11
+natural canary               = VALIDATED
+attribution                  = EXACT_PROSPECTIVE when no degradation reason is present
+                               (PARTIAL_PROSPECTIVE otherwise, with a closed reason)
+MISSING_TERMINAL_IS_SUCCESS  = NO
+OUTCOME_SCOPE                = routing_attempt
+content blind                = YES
+Router shadow                = YES
+Auto                         = NO
+```
 
 Standing constraints of that deployment: the router remains in `shadow` mode, Auto stays disabled
 (`JEV_AUTO_APPROVED` absent, no `JEV_AUTO*` key exists), and `G1_REAL_TRAFFIC_SAMPLE` remains
