@@ -522,4 +522,6 @@ tests/test_deployment_rehearsal.py     exports the candidate (git archive HEAD, 
 ```
 
 Version of record: ``plugin/plugin.yaml`` and ``router/__init__.py`` carry the same number, asserted
-by the gate and the suite. No release tag is created, because no release policy exists.
+by the gate and the suite. The repository tags releases (v0.1.0 .. v0.2.0, one tag per release);
+``0.3.0`` is deliberately untagged because nothing is released and nothing is deployed, and no tag
+is created this round.

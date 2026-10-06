@@ -15,7 +15,8 @@ Nothing in this package changes which model actually executes a turn.
 
 # Version of record. The deployment-relevant manifest (``plugin/plugin.yaml``) carries the same
 # number: two independently bumped version strings for one project is the drift this constant used
-# to cause (the manifest said 0.3.0 while this module still said 0.1.0). No git tag exists, because
-# no release policy has been established; ``tools/check_outcome_hook_contract.py`` fails the gate
-# when the two numbers diverge again.
+# to cause (the manifest said 0.3.0 while this module still said 0.1.0). The repository does carry a
+# tag-per-release convention (v0.1.0 .. v0.2.0); 0.3.0 is deliberately untagged because nothing is
+# released or deployed yet, and ``tools/check_outcome_hook_contract.py`` fails the gate when the
+# manifest and this constant diverge again.
 __version__ = "0.3.0"

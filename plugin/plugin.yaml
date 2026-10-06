@@ -1,6 +1,7 @@
 name: jev-shadow-router
 # Version of record: mirrored by router/__init__.py:__version__ and enforced by
-# tools/check_outcome_hook_contract.py. No git tag exists (no release policy).
+# tools/check_outcome_hook_contract.py. Tag convention: one tag per release (v0.1.0 .. v0.2.0);
+# 0.3.0 is deliberately untagged because nothing is released and nothing is deployed yet.
 version: "0.3.0"
 description: "Shadow-only routing observer: asks a TypeSafe JEV routing service for a route decision once per user turn, logs the decision and never changes the executing model."
 author: "hermes-adaptive-model-router contributors"

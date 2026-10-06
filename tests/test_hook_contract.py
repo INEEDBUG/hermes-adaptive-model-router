@@ -170,9 +170,15 @@ def main():
         json.dumps({'plugin.yaml': manifest_version, 'router': router.__version__}))
     chk('C6 the gate reports version consistency rather than leaving it implicit',
         c['VERSION_CONSISTENCY'] == 'PASS', json.dumps(c['VERSIONS_OF_RECORD']))
-    chk('C7 no release tag exists, so none was invented',
-        subprocess.run(['git', 'tag', '--list'], cwd=ROOT, capture_output=True,
-                       text=True).stdout.strip() == '')
+    # The repository does tag releases (v0.1.0 .. v0.2.0), so the assertion is not "no tags exist" —
+    # that would be false wherever tags were fetched. What must hold is that this round invented no
+    # release: the current version is untagged and HEAD carries no tag.
+    tags = subprocess.run(['git', 'tag', '--list'], cwd=ROOT, capture_output=True, text=True).stdout
+    pointed = subprocess.run(['git', 'tag', '--points-at', 'HEAD'], cwd=ROOT, capture_output=True,
+                             text=True).stdout.strip()
+    chk('C7 the current version is deliberately untagged and HEAD carries no release tag',
+        f'v{router.__version__}' not in tags.split() and pointed == '',
+        json.dumps({'tags': tags.split(), 'pointed_at_head': pointed}))
 
     # ---------------- D: the real Hermes tree, when present ----------------
     if REAL_HERMES.is_dir():

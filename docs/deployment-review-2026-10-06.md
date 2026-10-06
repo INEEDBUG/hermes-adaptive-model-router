@@ -15,7 +15,7 @@ variable, plugin file, runtime generation or gateway process was touched.
 | 5 | ``duration_ms`` was unnamed and could be read as user-perceived latency | an analyst could quote it as latency or model speed | ``DURATION_SEMANTIC = observed_execution_duration_ms`` recorded in the schema and documented as accumulator-open → terminal hook |
 | 6 | the parser accepted unexpected fields and unknown enums | a content-bearing or malformed row could enter an aggregate | fail-closed ``validate_record``: unknown schema, unexpected field, invalid status/quality/reason, malformed numeric and wrong type all reject; counts by closed reason only, values never echoed |
 | 7 | the day file name depended on the process timezone | two hosts could partition one day differently | ``OUTCOME_DAY_PARTITION = UTC`` via ``time.gmtime()``, asserted under four timezones |
-| 8 | manifest version ``0.3.0`` vs module ``0.1.0`` | version drift between manifest, library and docs | single version of record, enforced by the new gate; no tag created (no release policy) |
+| 8 | manifest version ``0.3.0`` vs module ``0.1.0`` | version drift between manifest, library and docs | single version of record, enforced by the new gate; ``0.3.0`` stays untagged (the tag convention is one tag per release: v0.1.0 .. v0.2.0, and nothing is released or deployed this round) |
 
 Retained by design, re-verified: content blindness (structural allow-lists), the reused
 ``_admit`` boundary and unchanged rejection counters, append-only writing with owner-only
